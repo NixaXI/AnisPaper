@@ -1,0 +1,32 @@
+{
+  "name": "anispaper-ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ANIS STAR control room for anis-paperd",
+  "main": "dist-electron/electron/main.js",
+  "scripts": {
+    "dev": "node ./node_modules/concurrently/dist/bin/concurrently.js -k -n renderer,electron -c cyan,magenta \"node ./scripts/vite-with-esbuild.mjs --host 127.0.0.1\" \"node ./node_modules/wait-on/bin/wait-on tcp:127.0.0.1:5173 && node ./node_modules/cross-env/src/bin/cross-env.js VITE_DEV_SERVER_URL=http://127.0.0.1:5173 node ./scripts/electron-runtime.mjs .\"",
+    "build": "node ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/typescript/bin/tsc -p tsconfig.electron.json && node ./scripts/vite-with-esbuild.mjs build",
+    "typecheck": "node ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/typescript/bin/tsc -p tsconfig.electron.json",
+    "start": "node ./scripts/electron-runtime.mjs ."
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "electron": "^32.2.0",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.14",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "wait-on": "^8.0.1"
+  }
+}

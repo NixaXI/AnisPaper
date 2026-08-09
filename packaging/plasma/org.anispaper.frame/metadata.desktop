@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=AnisPaper Frame
+Comment=AnisPaper wallpaper bridge
+Type=Service
+X-KDE-PluginInfo-Name=org.anispaper.frame
+X-KDE-ServiceTypes=Plasma/Wallpaper
+X-KDE-ParentApp=
+X-KDE-PluginInfo-Author=AnisPaper
+X-KDE-PluginInfo-Version=0.1.0
+X-KDE-PluginInfo-Category=
+X-KDE-PluginInfo-License=MIT
+X-Plasma-MainScript=ui/main.qml
+

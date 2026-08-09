@@ -1,0 +1,13 @@
+[Unit]
+Description=AnisPaper renderer daemon
+After=graphical-session.target
+
+[Service]
+Type=simple
+Environment=XDG_RUNTIME_DIR=%t
+ExecStart=@CMAKE_INSTALL_PREFIX@/bin/anis-paperd
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

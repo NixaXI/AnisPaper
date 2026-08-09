@@ -1,0 +1,12 @@
+build/
+*.o
+node_modules/
+ui/node_modules/
+ui/dist/
+ui/dist-electron/
+ui/.vite/
+artifacts/probe-*/desktop.png
+artifacts/f3-scale-*/spectacle-*.png
+.vscode/
+.idea/
+.DS_Store

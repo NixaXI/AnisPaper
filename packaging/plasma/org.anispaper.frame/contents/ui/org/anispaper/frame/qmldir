@@ -1,0 +1,4 @@
+module org.anispaper.frame
+plugin anispaperframeprovider
+classname AnisPaperFramePlugin
+FrameBridgeSupport 1.0 FrameBridgeSupport.qml

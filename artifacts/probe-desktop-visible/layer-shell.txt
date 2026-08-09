@@ -1,0 +1,8 @@
+ANISPAPER_PROBE event=start run_id=19FE4ABC97B-3C25D timeout_ms=8000 requested_output=auto
+ANISPAPER_PROBE event=connect status=ok
+ANISPAPER_PROBE event=global protocol=zwlr_layer_shell_v1 status=advertised version=5
+ANISPAPER_PROBE event=output status=available name=HDMI-A-1
+ANISPAPER_PROBE event=output status=available name=DP-2
+ANISPAPER_PROBE event=surface status=requested layer=background protocol_version=4 run_id=19FE4ABC97B-3C25D
+ANISPAPER_PROBE event=surface status=configured layer=background width=1422 height=754 run_id=19FE4ABC97B-3C25D
+ANISPAPER_PROBE event=finish status=timeout_clean configured=1 run_id=19FE4ABC97B-3C25D
