@@ -76,6 +76,26 @@ export interface SavePreviewResult {
   path?: string;
 }
 
+export interface SddmSnapshotResult {
+  path: string;
+  width: number;
+  height: number;
+  output?: string;
+}
+
+export interface SddmInstallResult {
+  theme: string;
+  installed: boolean;
+  staged: string;
+}
+
+export interface SteamInstallResult {
+  id: string;
+  installed: boolean;
+  path?: string;
+  linked?: string;
+}
+
 export interface AnisPaperApi {
   rpc<T>(method: string, params?: JsonRecord): Promise<T>;
   chooseFolder(): Promise<string | null>;

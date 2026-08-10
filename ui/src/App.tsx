@@ -16,7 +16,10 @@ import type {
   Monitor,
   PreviewFrame,
   RendererStatus,
-  Settings
+  SddmInstallResult,
+  SddmSnapshotResult,
+  Settings,
+  SteamInstallResult
 } from "../shared/types";
 
 type NavView = "installed" | "discover" | "favorites" | "folders";
@@ -341,6 +344,9 @@ export default function App() {
   const [preview, setPreview] = useState<PreviewFrame | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [sddmBusy, setSddmBusy] = useState(false);
+  const [installId, setInstallId] = useState("");
+  const [installBusy, setInstallBusy] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const previewRequest = useRef(0);
 
@@ -597,6 +603,47 @@ export default function App() {
     [showToast]
   );
 
+  // F6: sddm.snapshot (frame actual del renderer o fallback ANIS) +
+  // sddm.installTheme (tema staged + pkexec del helper anispaper-sddm-install).
+  const updateSddm = useCallback(async () => {
+    if (sddmBusy) return;
+    setSddmBusy(true);
+    try {
+      const snapshot = await window.anispaper.rpc<SddmSnapshotResult>(
+        "sddm.snapshot",
+        selectedOutput ? { output: selectedOutput } : {}
+      );
+      const installed = await window.anispaper.rpc<SddmInstallResult>("sddm.installTheme");
+      showToast(`Tema SDDM actualizado (${snapshot.width}×${snapshot.height}) en ${installed.staged}.`);
+    } catch (error) {
+      showToast(`No se pudo actualizar SDDM: ${errorMessage(error)}`);
+    } finally {
+      setSddmBusy(false);
+    }
+  }, [selectedOutput, sddmBusy, showToast]);
+
+  // F7: steam.install por ID público; al terminar, el daemon hace refreshAsync
+  // y emite catalog.changed, que ya recarga esta grilla (evento suscripto).
+  const installSteamId = useCallback(async () => {
+    const trimmed = installId.trim().replace(/^steam:/, "");
+    if (!/^\d{1,20}$/.test(trimmed)) {
+      showToast("Ingresá un ID de Workshop numérico.");
+      return;
+    }
+    if (installBusy) return;
+    setInstallBusy(true);
+    try {
+      const result = await window.anispaper.rpc<SteamInstallResult>("steam.install", { id: trimmed });
+      showToast(result.installed ? `Steam Workshop ${trimmed} instalado y agregado al catálogo.` : "Instalación incierta.");
+      setInstallId("");
+      await loadCatalog();
+    } catch (error) {
+      showToast(`No se pudo instalar: ${errorMessage(error)}`);
+    } finally {
+      setInstallBusy(false);
+    }
+  }, [installId, installBusy, loadCatalog, showToast]);
+
   const saveVolume = useCallback(async () => {
     try {
       const saved = await window.anispaper.rpc<Settings>("settings.set", { defaultVolume: settings.defaultVolume });
@@ -664,6 +711,20 @@ export default function App() {
             </div>
             <button className="small-action" onClick={() => void loadCatalog().catch((error) => showToast(errorMessage(error)))}>↻ Actualizar</button>
           </div>
+          {view === "discover" && (
+            <div className="discover-install chamfer">
+              <input
+                value={installId}
+                onChange={(event) => setInstallId(event.target.value)}
+                onKeyDown={(event) => event.key === "Enter" && void installSteamId()}
+                placeholder="ID de Steam Workshop…"
+                aria-label="ID de Steam Workshop"
+              />
+              <button className="small-action" onClick={() => void installSteamId()} disabled={installBusy}>
+                {installBusy ? "Descargando…" : "⌁ Instalar por ID"}
+              </button>
+            </div>
+          )}
           <VirtualCatalogGrid
             items={filteredCatalog}
             selectedId={selected?.id}
@@ -719,6 +780,9 @@ export default function App() {
           </button>
           <button className="snapshot-button chamfer" onClick={() => void saveCurrentPreview()} disabled={!preview}>
             <span>📸</span> Capturar para SDDM
+          </button>
+          <button className="snapshot-button chamfer" onClick={() => void updateSddm()} disabled={sddmBusy || !online}>
+            <span>⬢</span> {sddmBusy ? "Actualizando SDDM…" : "Actualizar SDDM"}
           </button>
           {selected?.id.startsWith("steam:") && (
             <button className="steam-link" onClick={() => void window.anispaper.openSteam(selected.id).catch((error) => showToast(errorMessage(error)))}>Abrir en Steam ↗</button>

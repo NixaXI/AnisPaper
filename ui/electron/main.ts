@@ -19,8 +19,17 @@ const rpcMethods = new Set([
   "status.get",
   "wallpaper.apply",
   "wallpaper.stop",
-  "preview.frame"
+  "preview.frame",
+  "sddm.snapshot",
+  "sddm.installTheme",
+  "steam.install"
 ]);
+
+// steamcmd / pkexec pueden tardar minutos; el resto responde en segundos.
+const RPC_LONG_TIMEOUTS: Record<string, number> = {
+  "steam.install": 15 * 60_000,
+  "sddm.installTheme": 200_000
+};
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -95,10 +104,11 @@ class DaemonClient {
       return Promise.reject(new RpcError("La solicitud es demasiado grande."));
     }
     return new Promise<T>((resolve, reject) => {
+      const timeoutMs = RPC_LONG_TIMEOUTS[method] ?? RPC_TIMEOUT_MS;
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new RpcError(`El daemon no respondió a ${method}.`));
-      }, RPC_TIMEOUT_MS);
+      }, timeoutMs);
       this.pending.set(id, { resolve: (value) => resolve(value as T), reject, timer });
       socket.write(line, (error) => {
         if (!error) return;

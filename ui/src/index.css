@@ -40,7 +40,9 @@ button:disabled { cursor: not-allowed; opacity: .4; }
   align-items: center;
   padding: 0 20px;
   border-bottom: 1px solid rgba(0, 194, 255, .22);
-  background: rgba(16, 22, 34, .93);
+  /* Barra opaca: el translúcido .93 dejaba ver el fondo del shell ("barra
+     transparente"); el tema ANIS STAR usa superficies sólidas. */
+  background: #101622;
   box-shadow: 0 8px 32px rgba(0, 0, 0, .26);
 }
 
@@ -142,7 +144,10 @@ button:disabled { cursor: not-allowed; opacity: .4; }
 .empty-grid h2 { margin: 13px 0 7px; font-size: 13px; }
 .empty-grid p { margin: 0; color: #8093a4; font-size: 10px; line-height: 1.65; }
 
-.preview-panel { position: relative; min-width: 0; overflow: auto; padding: 19px 17px; border-left: 1px solid rgba(112, 154, 187, .22); background: rgba(16, 22, 34, .83); }
+.preview-panel { position: relative; min-width: 0; overflow: auto; padding: 19px 17px; border-left: 1px solid rgba(112, 154, 187, .22); background: #101622; }
+.discover-install { display: flex; gap: 8px; margin: 0 14px 12px; border: 1px solid #28485e; padding: 8px; background: #0a0d14; }
+.discover-install input { flex: 1; min-width: 0; border: 1px solid #22384a; padding: 8px 10px; background: #101622; color: #cfdce8; font-size: 10px; }
+.discover-install input:focus { border-color: #00c2ff; outline: 0; }
 .preview-heading { display: flex; align-items: center; gap: 7px; margin-bottom: 10px; }
 .preview-heading p { margin: 0; color: #a6c6dc; font-size: 10px; letter-spacing: 1.45px; }
 .preview-heading small { margin-left: auto; color: #00c2ff; font-size: 8px; letter-spacing: 1px; }
