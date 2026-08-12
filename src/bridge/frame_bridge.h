@@ -7,13 +7,38 @@
 #include <QJsonObject>
 #include <QString>
 
+#include <cstddef>
 #include <memory>
+#ifdef ANISPAPER_BRIDGE_TESTING
+#include <functional>
+#endif
 
 // POSIX shared memory is used rather than an anonymous memfd because the
 // Plasma plugin is an independent process and must be able to map the bridge
 // by output name.  The stable public name is /anispaper-<sanitized-output>.
 QString sanitizeBridgeOutput(const QString &output);
 QString bridgeShmName(const QString &output);
+
+// This view is deliberately valid only for the synchronous call which
+// publishes it.  It describes a SceneTransport mapping that the parent has
+// already bounds-checked at mmap time; no pointer from it reaches Plasma.
+struct SceneTransportView {
+  const SceneTransportHeader *header = nullptr;
+  const uchar *slotData = nullptr;
+  size_t slotBytes = 0;
+  quint32 buffers = 0;
+  quint32 width = 0;
+  quint32 height = 0;
+  quint32 stride = 0;
+  quint32 format = 0;
+};
+
+enum class SceneTransportPublishResult {
+  Published,
+  NoNewFrame,
+  Raced,
+  Ineligible,
+};
 
 class FrameBridge final {
  public:
@@ -31,6 +56,19 @@ class FrameBridge final {
   bool open(const QString &output, const QImage &fallback, const QSize &frameSize,
             const QString &scaleMode, QString *error);
   bool publish(const QImage &image, QString *error = nullptr);
+  // Direct native-scene fast path.  The public bridge still owns its payload;
+  // this only omits the transient parent QImage copy when the two layouts
+  // match exactly.  lastSceneFrame is owned by the transport reader.
+  SceneTransportPublishResult publishSceneTransport(const SceneTransportView &source,
+                                                     quint64 *lastSceneFrame);
+  // Owned on-demand copy for previews/snapshots.  This is intentionally not a
+  // per-frame transport buffer.
+  QImage snapshot() const;
+#ifdef ANISPAPER_BRIDGE_TESTING
+  // Test-only deterministic interleave point after the public busy marker and
+  // halfway through a direct copy.  It is not compiled into production.
+  void setSceneCopyHookForTesting(std::function<void()> hook);
+#endif
   void close();
 
   bool isOpen() const;
@@ -65,6 +103,10 @@ class FrameBridgeManager final {
   bool ensure(const QString &output, const QImage &fallback, const QSize &frameSize,
               const QString &scaleMode, QString *error);
   bool publish(const QString &output, const QImage &frame, QString *error = nullptr);
+  SceneTransportPublishResult publishSceneTransport(const QString &output,
+                                                     const SceneTransportView &source,
+                                                     quint64 *lastSceneFrame);
+  QImage snapshot(const QString &output) const;
   void stop(const QString &output);
   QJsonObject statusFor(const QString &output) const;
 

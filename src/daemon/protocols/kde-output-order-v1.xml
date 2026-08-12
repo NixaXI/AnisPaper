@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="kde_output_order_v1">
+  <interface name="kde_output_order_v1" version="1">
+    <request name="destroy" type="destructor"/>
+    <event name="output">
+      <arg name="output_name" type="string"/>
+    </event>
+    <event name="done"/>
+  </interface>
+</protocol>

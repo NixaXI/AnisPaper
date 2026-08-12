@@ -15,6 +15,9 @@ struct RendererSpec {
   QString file;
   QString preview;
   QString output;
+  // Absolute path of the wallpaper project directory (used by the scene engine
+  // child, which mounts the whole directory, including scene.pkg).
+  QString root;
   QJsonObject properties;
   int fps = 30;
   double volume = 1.0;
@@ -22,6 +25,10 @@ struct RendererSpec {
   bool loop = true;
   int width = 640;
   int height = 360;
+  // User-selected scaling policy (cover/fit/stretch).  Renderers that produce
+  // a single static frame (scene/static fallbacks) honour it themselves so the
+  // bridge never rescales a second time.
+  QString scaleMode = QStringLiteral("cover");
 };
 
 class Renderer : public QObject {

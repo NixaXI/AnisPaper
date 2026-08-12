@@ -10,3 +10,48 @@ artifacts/f3-scale-*/spectacle-*.png
 .vscode/
 .idea/
 .DS_Store
+
+# --- ANISPAPER PUBLIC REPO ---
+build/
+build-*/
+cmake-build-*/
+out/
+artifacts/
+
+ui/node_modules/
+ui/dist/
+ui/dist-electron/
+ui/release/
+ui/.vite/
+ui/coverage/
+
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
+*.before-*
+*.backup-*
+*~
+
+.DS_Store
+Thumbs.db
+
+# Personal/local AI tool state. AI-assisted contributions themselves are allowed.
+.codex/
+.claude/
+.cursor/
+.aider/
+.aider.conf.yml
+.aider.chat.history.md
+CLAUDE.md
+CODEX.md
+
+# One-off local API/Postman workspaces.
+.postman/
+postman/
+# --- END ANISPAPER PUBLIC REPO ---

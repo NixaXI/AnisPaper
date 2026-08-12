@@ -16,6 +16,12 @@ WallpaperItem {
         const configured = String(root.configuration.Output || "").trim()
         return configured.length > 0 ? configured : Screen.name
     }
+    // Push-driven: watcher.frameNo only changes when the daemon really
+    // published a new bridge frame, so the Image source (and thus the
+    // expensive copy + texture rebuild) updates at the true publication rate
+    // instead of on a fixed GUI timer that re-uploads every tick.
+    // `real` keeps the 64-bit sequence exact past 2^31 frames.
+    readonly property real frameNo: watcher.frameNo
     // The image provider exposes the native FrameHeader dimensions.  Never
     // implicitly stretch that frame to a logical-size WallpaperItem: calculate
     // source and destination rectangles from both aspect ratios instead.
@@ -23,7 +29,6 @@ WallpaperItem {
         const requested = String(root.configuration.ScaleMode || "cover").trim().toLowerCase()
         return requested === "fit" || requested === "stretch" ? requested : "cover"
     }
-    property int frameNo: 0
     readonly property real frameWidth: bridgeImage.implicitWidth > 0
                                        ? bridgeImage.implicitWidth : Math.max(1, width)
     readonly property real frameHeight: bridgeImage.implicitHeight > 0
@@ -86,10 +91,11 @@ WallpaperItem {
         }
     }
 
-    Timer {
-        interval: 33
-        running: true
-        repeat: true
-        onTriggered: root.frameNo += 1
+    // Push-driven source updates: FrameWatcher polls the ANIS header (~60 Hz,
+    // header-only, ~3 syscalls/tick) and emits frameNoChanged only when the
+    // daemon published a new frame.
+    AnisPaperFrame.FrameWatcher {
+        id: watcher
+        output: root.frameOutput
     }
 }

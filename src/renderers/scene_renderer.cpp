@@ -2,6 +2,9 @@
 
 #include "static_image_renderer.h"
 
+#include <QCoreApplication>
+#include <QFileInfo>
+
 SceneRenderer::SceneRenderer(RendererSpec spec, QObject *parent)
     : Renderer(std::move(spec), parent) {}
 
@@ -53,9 +56,19 @@ bool SceneRenderer::isRunning() const { return running_; }
 bool SceneRenderer::isFallback() const { return true; }
 
 bool SceneRenderer::nativeSupported() {
-  // Deliberately explicit until a supported libwallpaperengine ABI is present
-  // and wrapped by a real offscreen implementation.
-  return false;
+  // Native scene rendering is available when the isolated scene engine child
+  // binary (the vendored offscreen Wallpaper Engine renderer) exists next to
+  // the daemon executable.  The fallback below remains as the error path.
+  static const bool supported = [] {
+    const QString overridePath = qEnvironmentVariable("ANISPAPER_SCENE_ENGINE_BIN");
+    if (!overridePath.isEmpty()) {
+      return QFileInfo(overridePath).isFile();
+    }
+    const QString sibling = QCoreApplication::applicationDirPath() +
+                            QStringLiteral("/anis-paper-scene-engine");
+    return QFileInfo(sibling).isFile();
+  }();
+  return supported;
 }
 
 QString SceneRenderer::unsupportedBadge() {

@@ -5,6 +5,7 @@
 #include "scene_renderer.h"
 #include "static_image_renderer.h"
 
+#include <QFile>
 #include <QFileInfo>
 #include <QTimer>
 
@@ -67,7 +68,48 @@ bool RendererManager::apply(const QJsonObject &item, const QString &output,
     if (errorCode) *errorCode = -32001;
     return false;
   }
-  if (Entry *existing = byOutput_.value(normalizedOutput, nullptr)) {
+
+  // Build and validate the requested scene before replacing an active output.
+  // A malformed Workshop project must be rejected without touching its current
+  // renderer, bridge, child process, or watchdog state.
+  const RendererSpec requestedSpec = makeSpec(item, normalizedOutput, options);
+  if (requestedSpec.type == QStringLiteral("scene")) {
+  // ANISPAPER_SCENE_PROJECT_PREFLIGHT_V2
+  // scene.json suele vivir dentro de scene.pkg; validar el proyecto, no sólo
+  // la ruta lógica declarada por project.json.
+  const QString projectDir =
+      !requestedSpec.root.isEmpty()
+          ? requestedSpec.root
+          : QFileInfo(requestedSpec.file).absolutePath();
+
+  const QFileInfo projectInfo(projectDir);
+  const QFileInfo looseScene(requestedSpec.file);
+  const QFileInfo packageFile(projectDir + QStringLiteral("/scene.pkg"));
+
+  QString invalidReason;
+  if (projectDir.isEmpty() || !projectInfo.isDir()) {
+    invalidReason =
+        QStringLiteral("scene project directory does not exist: %1").arg(projectDir);
+  } else {
+    const bool looseSceneOk = looseScene.isFile() && looseScene.size() > 0;
+    const bool packageOk = packageFile.isFile() && packageFile.size() > 0;
+    if (!looseSceneOk && !packageOk) {
+      invalidReason =
+          QStringLiteral("scene project has neither a usable loose scene file nor scene.pkg: %1")
+              .arg(projectDir);
+    }
+  }
+
+  if (!invalidReason.isEmpty()) {
+    if (error)
+      *error = QStringLiteral("INVALID_WALLPAPER: %1").arg(invalidReason);
+    if (errorCode)
+      *errorCode = -32001;
+    return false;
+  }
+}
+
+if (Entry *existing = byOutput_.value(normalizedOutput, nullptr)) {
     if (existing->safeMode && existing->spec.id == id) {
       if (error) *error = QStringLiteral("safe mode active");
       if (errorCode) *errorCode = -32002;
@@ -80,7 +122,6 @@ bool RendererManager::apply(const QJsonObject &item, const QString &output,
   // mode.  KWin's logical geometry at 135% is deliberately not used here:
   // wl_output::scale is only an integer buffer scale and multiplying a mode by
   // it would turn a 1920x1080 connector into an incorrect 3840x2160 frame.
-  const RendererSpec requestedSpec = makeSpec(item, normalizedOutput, options);
   const QSize physicalFrameSize(requestedSpec.width, requestedSpec.height);
   QString bridgeError;
   if (!bridges_.ensure(normalizedOutput,
@@ -141,7 +182,12 @@ QJsonObject RendererManager::stop(const QString &output) {
 
 QImage RendererManager::lastFrame(const QString &output) const {
   const Entry *entry = byOutput_.value(output, nullptr);
-  return entry && entry->renderer ? entry->renderer->lastFrame() : QImage();
+  if (!entry) return {};
+  if (entry->renderer) return entry->renderer->lastFrame();
+  // A child can die between watchdog attempts.  handleFailure() has already
+  // published a static image to the existing bridge, so previews remain
+  // usable during that bounded restart window instead of returning -32001.
+  return bridges_.snapshot(output);
 }
 
 bool RendererManager::safeMode(const QString &output) const {
@@ -183,6 +229,7 @@ RendererSpec RendererManager::makeSpec(const QJsonObject &item,
   spec.file = item.value(QStringLiteral("file")).toString();
   spec.preview = item.value(QStringLiteral("preview")).toString();
   spec.output = output;
+  spec.root = item.value(QStringLiteral("root")).toString().trimmed();
   spec.properties = item.value(QStringLiteral("properties")).toObject();
   spec.fps = qBound(1, options.fps, 60);
   spec.volume = numericProperty(spec.properties, QStringLiteral("volume"),
@@ -200,6 +247,12 @@ RendererSpec RendererManager::makeSpec(const QJsonObject &item,
   spec.speed = numericProperty(spec.properties, QStringLiteral("speed"), 1.0,
                                0.1, 4.0);
   spec.loop = booleanProperty(spec.properties, QStringLiteral("loop"), true);
+  {
+    const QString mode = options.scaleMode.trimmed().toLower();
+    spec.scaleMode = mode == QStringLiteral("fit") || mode == QStringLiteral("stretch")
+                         ? mode
+                         : QStringLiteral("cover");
+  }
   const QSize physical = physicalWaylandOutputSize(output);
   if (physical.width() >= 64 && physical.width() <= 3840 &&
       physical.height() >= 64 && physical.height() <= 2160) {
@@ -224,6 +277,16 @@ void RendererManager::createRenderer(Entry *entry, bool staticFallback) {
   }
   entry->renderer = renderer;
   entry->rendererReady = false;
+  if (auto *isolated = qobject_cast<IsolatedRenderer *>(renderer)) {
+    isolated->setSceneTransportCallbacks(
+        [this, entry](const SceneTransportView &source, quint64 *lastSceneFrame) {
+          if (!isCurrent(entry)) return SceneTransportPublishResult::Ineligible;
+          return bridges_.publishSceneTransport(entry->output, source, lastSceneFrame);
+        },
+        [this, entry] {
+          return isCurrent(entry) ? bridges_.snapshot(entry->output) : QImage();
+        });
+  }
   connect(renderer, &Renderer::fatal, this, [this, entry](const QString &reason) {
     handleFailure(entry, reason);
   });
@@ -253,7 +316,7 @@ void RendererManager::createRenderer(Entry *entry, bool staticFallback) {
     return;
   }
   if (!staticFallback && !entry->rendererReady) {
-    entry->startupTimer->start(startupWindowMs());
+    entry->startupTimer->start(startupWindowMs(entry->spec, entry->sceneNativeUnsupported));
   }
 }
 
@@ -277,6 +340,15 @@ void RendererManager::handleFailure(Entry *entry, const QString &reason) {
   entry->startupTimer->stop();
   entry->stableTimer->stop();
   destroyRenderer(entry);
+  // Keep a valid, owned frame in the public bridge while the isolated child
+  // backs off.  This is especially important for corrupt Scene projects:
+  // their parser failure is contained in the child, but the desktop and
+  // preview RPC must not become blank during the 1/3/9-second watchdog path.
+  StaticImageRenderer visibleFallback(entry->spec);
+  QString fallbackError;
+  if (visibleFallback.start(&fallbackError)) {
+    bridges_.publish(entry->output, visibleFallback.lastFrame());
+  }
   ++entry->crashes;
   entry->lastError = reason;
   const bool enteringSafeMode = entry->crashes >= kCrashThreshold;
@@ -320,6 +392,9 @@ void RendererManager::resetCrashCount(Entry *entry) {
   }
   entry->crashes = 0;
   entry->lastBackoffSeconds = 0;
+  // A stable child has recovered.  Leaving an old "Process crashed" error in
+  // status after the count was reset made a healthy renderer look broken.
+  entry->lastError.clear();
 }
 
 void RendererManager::removeEntry(const QString &output, const QString &reason,
@@ -392,10 +467,11 @@ QJsonObject RendererManager::statusFor(const Entry *entry) const {
   result.insert(QStringLiteral("wallpaperId"), entry->spec.id);
   result.insert(QStringLiteral("fps"), entry->renderer ? entry->renderer->frameRate() : 0.0);
   result.insert(QStringLiteral("pid"), entry->renderer ? entry->renderer->processId() : 0);
-  result.insert(QStringLiteral("hasFrame"),
-                entry->renderer && !entry->renderer->lastFrame().isNull());
+  const QImage currentFrame = lastFrame(entry->output);
+  result.insert(QStringLiteral("hasFrame"), !currentFrame.isNull());
   result.insert(QStringLiteral("fallback"),
-                entry->renderer && entry->renderer->isFallback());
+                (entry->renderer && entry->renderer->isFallback()) ||
+                    (!entry->renderer && !currentFrame.isNull()));
   result.insert(QStringLiteral("lastBackoffSeconds"), entry->lastBackoffSeconds);
   result.insert(QStringLiteral("bridge"), bridges_.statusFor(entry->output));
   return result;
@@ -449,10 +525,18 @@ int RendererManager::stableWindowMs() {
   return ok && testValue >= 10 && testValue <= 60000 ? testValue : 60000;
 }
 
-int RendererManager::startupWindowMs() {
+int RendererManager::startupWindowMs(const RendererSpec &spec, bool sceneNativeUnsupported) {
   bool ok = false;
   const int testValue = qEnvironmentVariable("ANISPAPER_TEST_STARTUP_MS").toInt(&ok);
-  return ok && testValue >= 100 && testValue <= 10000 ? testValue : 6000;
+  if (ok && testValue >= 100 && testValue <= 10000) {
+    return testValue;
+  }
+
+  // Native Wallpaper Engine scenes parse and initialize their project before
+  // publishing the first frame. Real projects can legitimately exceed the
+  // video/web renderer window, but the watchdog must still remain bounded.
+  const bool nativeScene = spec.type == QStringLiteral("scene") && !sceneNativeUnsupported;
+  return nativeScene ? 15000 : 6000;
 }
 
 int RendererManager::scaledDelayMs(int seconds) {

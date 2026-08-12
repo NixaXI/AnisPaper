@@ -72,6 +72,10 @@ QImage FrameImageProvider::requestImage(const QString &id, QSize *size,
       cached.image = current;
       cached.frameNo = actual;
       cached.resetPending = false;
+    } else if (actual == cached.frameNo && !cached.image.isNull()) {
+      // Fast path: no new frame published since the last request.  Serve the
+      // cached copy instead of memcpy'ing the same multi-megabyte payload
+      // again for every redundant poll tick (QML polls at up to 60 Hz).
     } else if (expected != 0 && expected <= cached.frameNo && actual < expected &&
                !cached.image.isNull()) {
       // A caller that knows a prior producer sequence asked for a newer one;

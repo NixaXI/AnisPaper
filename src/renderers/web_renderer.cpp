@@ -57,7 +57,9 @@ bool WebRenderer::start(QString *error) {
   // failure that does not take down the local document.
   frame_ = StaticImageRenderer::fallbackFrame(QStringLiteral("ANISPAPER WEB"),
                                                spec_.width, spec_.height);
-  emit frameReady(frame_);
+  // Defer so the parent protocol can publish its "ready" message before the
+  // first frame (emitting synchronously here would reverse their order).
+  QTimer::singleShot(0, this, [this] { emit frameReady(frame_); });
   frameTimer_.start(qMax(1, 1000 / qBound(1, spec_.fps, 60)));
   return true;
 }

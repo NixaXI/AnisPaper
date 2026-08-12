@@ -1,6 +1,10 @@
 #include "../common/wayland_monitor.h"
+#include "plasma_wallpaper_activator.h"
+#include "plasma_login_manager.h"
+#include "plasma_login_wallpaper.h"
 #include "../renderers/renderer_child.h"
 #include "../renderers/renderer_manager.h"
+#include "../renderers/static_image_renderer.h"
 
 #include <QCoreApplication>
 #include <QBuffer>
@@ -9,6 +13,7 @@
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
+#include <QImageReader>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -19,6 +24,9 @@
 #include <QThreadPool>
 #include <QTimer>
 #include <QPointer>
+#include <QProcess>
+#include <QRegularExpression>
+#include <QStandardPaths>
 #include <QThread>
 #include <QSet>
 #include <QHash>
@@ -136,11 +144,55 @@ QString safeChild(const QString &root, const QString &relative) {
   return !canonicalAncestor.isEmpty()&&isWithin(root,canonicalAncestor) ? lexical : QString();
 }
 QString inferType(QString type, const QString &file) { type=type.trimmed().toLower(); if(type=="video"||type=="web"||type=="scene"||type=="application") return type; auto e=QFileInfo(file).suffix().toLower(); if(e=="mp4"||e=="webm"||e=="mkv") return "video"; if(e=="html"||e=="htm") return "web"; return "unknown"; }
+
+// Preview selection only reads image metadata.  Workshop projects often carry
+// both the manifest's small thumbnail and a larger preview.* in the item root;
+// retaining the largest valid image avoids needlessly upscaling scene-static.
+QString largestPreview(const QString &root, const QString &declaredPreview) {
+  QSet<QString> candidates;
+  const auto addCandidate = [&root, &candidates](const QString &relative) {
+    const QString path = safeChild(root, relative);
+    if (!path.isEmpty() && QFileInfo(path).isFile()) candidates.insert(path);
+  };
+
+  if (!declaredPreview.isEmpty()) addCandidate(declaredPreview);
+
+  QSet<QByteArray> imageFormats;
+  for (const QByteArray &format : QImageReader::supportedImageFormats()) {
+    imageFormats.insert(format.toLower());
+  }
+  const QDir itemDir(root);
+  const auto files = itemDir.entryInfoList(
+      QDir::Files | QDir::Readable | QDir::NoSymLinks, QDir::Name);
+  for (const QFileInfo &file : files) {
+    // Restrict automatic discovery to formats Qt can inspect.  We still use
+    // QImageReader::size below, rather than decoding image pixels.
+    if (imageFormats.contains(file.suffix().toLatin1().toLower())) {
+      addCandidate(file.fileName());
+    }
+  }
+
+  QString selected;
+  qint64 selectedPixels = -1;
+  for (const QString &candidate : candidates) {
+    QImageReader reader(candidate);
+    const QSize size = reader.size();
+    if (!size.isValid()) continue;
+    const qint64 pixels = static_cast<qint64>(size.width()) * size.height();
+    if (pixels > selectedPixels ||
+        (pixels == selectedPixels && (selected.isEmpty() || candidate < selected))) {
+      selected = candidate;
+      selectedPixels = pixels;
+    }
+  }
+  return selected;
+}
+
 QJsonObject projectItem(const QString &root, const QString &projectPath, const QString &id, const QString &source) {
   if(QFileInfo(projectPath).isSymLink()) return {};
   QFile f(projectPath); if(!f.open(QIODevice::ReadOnly)||f.size()>5*1024*1024) return {}; QJsonParseError pe; auto doc=QJsonDocument::fromJson(f.readAll(),&pe); if(pe.error!=QJsonParseError::NoError||!doc.isObject()) return {}; auto p=doc.object();
   auto file=p.value("file").toString(); auto preview=p.value("preview").toString(); auto general=p.value("general").toObject(); auto props=general.value("properties");
-  auto sf=safeChild(root,file); if(!file.isEmpty()&&sf.isEmpty()) return {}; auto sp=preview.isEmpty()?QString():safeChild(root,preview); if(!preview.isEmpty()&&sp.isEmpty()) preview={};
+  auto sf=safeChild(root,file); if(!file.isEmpty()&&sf.isEmpty()) return {}; auto sp=largestPreview(root,preview);
   QJsonArray tags; for(auto t:p.value("tags").toArray()) if(t.isString()) tags.append(t);
   return {{"id",id},{"title",p.value("title").toString(QFileInfo(root).fileName())},{"type",inferType(p.value("type").toString(),file)},{"file",sf},{"preview",sp},{"tags",tags},{"properties",props.isObject()?props:QJsonValue(QJsonObject{})},{"source",source},{"root",root}};
 }
@@ -180,11 +232,101 @@ void addMissingPathWatch(const QString &target, QStringList &watchDirs, QHash<QS
   const auto ancestor=canonicalDir(probe); if(ancestor.isEmpty()||child.isEmpty()) return;
   watchDirs<<ancestor; filters[ancestor].insert(child);
 }
+// --- F6 SDDM + F7 Steam helpers (fail-closed; no contract renames) ---------
+QString sddmConfigDir() { return configHome()+"/anispaper"; }
+
+bool copyRecursive(const QString &src, const QString &dst) {
+  QDir source(src);
+  if (!source.exists()) return false;
+  if (!QDir().mkpath(dst)) return false;
+  const auto entries = source.entryInfoList(
+      QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot | QDir::NoSymLinks);
+  for (const auto &entry : entries) {
+    const QString target = dst + "/" + entry.fileName();
+    if (entry.isDir()) {
+      if (!copyRecursive(entry.absoluteFilePath(), target)) return false;
+    } else if (!QFile::copy(entry.absoluteFilePath(), target)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Lee el tema SDDM activo sin privilegios; breeze es el default de KDE.
+QString activeSddmThemeDir() {
+  QString current;
+  const QStringList confDirs{"/etc/sddm.conf.d", "/usr/lib/sddm/sddm.conf.d"};
+  const QRegularExpression rx(QStringLiteral("^\\s*Current\\s*=\\s*(\\S+)"),
+                              QRegularExpression::CaseInsensitiveOption);
+  for (const auto &dirPath : confDirs) {
+    QDir dir(dirPath);
+    const auto files = dir.entryInfoList({"*.conf"}, QDir::Files, QDir::Name);
+    for (const auto &file : files) {
+      QFile f(file.absoluteFilePath());
+      if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
+      while (!f.atEnd()) {
+        const auto match = rx.match(QString::fromUtf8(f.readLine()));
+        if (match.hasMatch()) current = match.captured(1);
+      }
+    }
+  }
+  if (current.isEmpty()) current = QStringLiteral("breeze");
+  current = QFileInfo(current).fileName();  // no path traversal
+  const QString dir = "/usr/share/sddm/themes/" + current;
+  return QFileInfo(dir).isDir() ? dir : QString();
+}
+
+QString resolveSddmHelper() {
+  const auto env = qEnvironmentVariable("ANISPAPER_SDDM_HELPER");
+  QStringList candidates;
+  if (!env.isEmpty()) candidates << env;
+  candidates << QCoreApplication::applicationDirPath() + "/anispaper-sddm-install"
+             << QDir::homePath() + "/.local/libexec/anispaper/anispaper-sddm-install"
+             << QStringLiteral("/usr/local/libexec/anispaper/anispaper-sddm-install")
+             << QCoreApplication::applicationDirPath() + "/../tools/sddm/anispaper-sddm-install";
+  for (const auto &candidate : candidates) {
+    const QString canonical = QFileInfo(candidate).canonicalFilePath();
+    if (!canonical.isEmpty() && QFileInfo(canonical).isExecutable()) return canonical;
+  }
+  return {};
+}
+
 ScanResult scan(const Settings &settings) {
-  ScanResult r; QSet<QString> ids, projectFiles, contentRoots; auto append=[&](QJsonObject x){ if(!x.isEmpty()&&!ids.contains(x.value("id").toString())) { ids.insert(x.value("id").toString()); if(!x.value("file").toString().isEmpty()) projectFiles.insert(x.value("file").toString()); r.items.append(x); } };
+  ScanResult r; QSet<QString> ids, projectFiles, contentRoots;
+  // A user may add a Steam workshop subtree as a custom folder (including via
+  // the steam-import link).  ID-only de-duplication then exposed both
+  // custom:<hash> and steam:<workshopId> for the same canonical project.
+  // Keep this index only for manifest-backed projects: loose custom videos
+  // intentionally share their containing custom-folder root.
+  QHash<QString, int> projectIndexByRoot;
+  auto append=[&](QJsonObject x){ if(!x.isEmpty()&&!ids.contains(x.value("id").toString())) { ids.insert(x.value("id").toString()); if(!x.value("file").toString().isEmpty()) projectFiles.insert(x.value("file").toString()); r.items.append(x); } };
+  auto appendProject=[&](QJsonObject x) {
+    if (x.isEmpty()) return;
+    const QString root = x.value("root").toString();
+    if (root.isEmpty()) return;
+    const auto existing = projectIndexByRoot.constFind(root);
+    if (existing != projectIndexByRoot.cend()) {
+      const QJsonObject prior = r.items.at(*existing).toObject();
+      // Steam's stable Workshop ID is the public identity when a physical
+      // project appears through both discovery paths.  This branch also keeps
+      // the contract true if scan ordering changes later.
+      if (x.value("source").toString() == "steam" &&
+          prior.value("source").toString() != "steam") {
+        ids.remove(prior.value("id").toString());
+        ids.insert(x.value("id").toString());
+        r.items[*existing] = x;
+      }
+      return;
+    }
+    if (ids.contains(x.value("id").toString())) return;
+    ids.insert(x.value("id").toString());
+    if(!x.value("file").toString().isEmpty()) projectFiles.insert(x.value("file").toString());
+    projectIndexByRoot.insert(root, r.items.size());
+    r.items.append(x);
+  };
   r.vdfWatchPaths=configuredVdfPaths();
-  for(const auto&vdf:vdfPaths()) { if(!QFileInfo::exists(vdf)) continue; r.vdfParsePaths<<vdf; for(const auto&lib:librariesFromVdf(vdf)) { QString content=lib+"/steamapps/workshop/content/431960"; auto cc=canonicalDir(content); if(cc.isEmpty()) { addMissingContentWatch(lib,r); continue; } if(contentRoots.contains(cc)) continue; contentRoots.insert(cc); r.watchDirs<<cc; QDir d(cc); for(auto n:d.entryList(QDir::Dirs|QDir::NoDotAndDotDot,QDir::Name)) { if(!n.contains(QRegularExpression("^\\d+$"))) continue; const QFileInfo entry(cc+"/"+n); if(entry.isSymLink()) continue; auto root=canonicalDir(entry.absoluteFilePath()); if(root.isEmpty()||!isWithin(cc,root)||canonicalDir(QFileInfo(root).absolutePath())!=cc) continue; r.watchDirs<<root; auto project=root+"/project.json"; if(QFileInfo(project).isFile()) append(projectItem(root,project,"steam:"+n,"steam")); } } }
-  for(const auto&custom:settings.customFolders) { auto root=canonicalDir(custom); if(root.isEmpty()) continue; r.watchDirs<<root; QDirIterator dirs(root,QDir::Dirs|QDir::NoDotAndDotDot,QDirIterator::Subdirectories); while(dirs.hasNext()) { auto d=canonicalDir(dirs.next()); if(!d.isEmpty()&&isWithin(root,d))r.watchDirs<<d; } QDirIterator it(root,{"project.json"},QDir::Files,QDirIterator::Subdirectories); while(it.hasNext()) { auto pj=it.next(); auto pRoot=canonicalDir(QFileInfo(pj).absolutePath()); if(!pRoot.isEmpty()&&isWithin(root,pRoot)) { r.watchDirs<<pRoot; append(projectItem(pRoot,pj,hashId("custom:",pRoot),"custom")); } } QDirIterator videos(root,{"*.mp4","*.webm","*.mkv"},QDir::Files,QDirIterator::Subdirectories); while(videos.hasNext()) { auto f=videos.next(); auto cf=QFileInfo(f).canonicalFilePath(); if(cf.isEmpty()||!isWithin(root,cf)||projectFiles.contains(cf)) continue; append(QJsonObject{{"id",hashId("custom:",cf)},{"title",QFileInfo(cf).completeBaseName()},{"type","video"},{"file",cf},{"preview",QString()},{"tags",QJsonArray{}},{"properties",QJsonObject{}},{"source","custom"},{"root",root}}); } }
+  for(const auto&vdf:vdfPaths()) { if(!QFileInfo::exists(vdf)) continue; r.vdfParsePaths<<vdf; for(const auto&lib:librariesFromVdf(vdf)) { QString content=lib+"/steamapps/workshop/content/431960"; auto cc=canonicalDir(content); if(cc.isEmpty()) { addMissingContentWatch(lib,r); continue; } if(contentRoots.contains(cc)) continue; contentRoots.insert(cc); r.watchDirs<<cc; QDir d(cc); for(auto n:d.entryList(QDir::Dirs|QDir::NoDotAndDotDot,QDir::Name)) { if(!n.contains(QRegularExpression("^\\d+$"))) continue; const QFileInfo entry(cc+"/"+n); if(entry.isSymLink()) continue; auto root=canonicalDir(entry.absoluteFilePath()); if(root.isEmpty()||!isWithin(cc,root)||canonicalDir(QFileInfo(root).absolutePath())!=cc) continue; r.watchDirs<<root; auto project=root+"/project.json"; if(QFileInfo(project).isFile()) appendProject(projectItem(root,project,"steam:"+n,"steam")); } } }
+  for(const auto&custom:settings.customFolders) { auto root=canonicalDir(custom); if(root.isEmpty()) continue; r.watchDirs<<root; QDirIterator dirs(root,QDir::Dirs|QDir::NoDotAndDotDot,QDirIterator::Subdirectories); while(dirs.hasNext()) { auto d=canonicalDir(dirs.next()); if(!d.isEmpty()&&isWithin(root,d))r.watchDirs<<d; } QDirIterator it(root,{"project.json"},QDir::Files,QDirIterator::Subdirectories); while(it.hasNext()) { auto pj=it.next(); auto pRoot=canonicalDir(QFileInfo(pj).absolutePath()); if(!pRoot.isEmpty()&&isWithin(root,pRoot)) { r.watchDirs<<pRoot; appendProject(projectItem(pRoot,pj,hashId("custom:",pRoot),"custom")); } } QDirIterator videos(root,{"*.mp4","*.webm","*.mkv"},QDir::Files,QDirIterator::Subdirectories); while(videos.hasNext()) { auto f=videos.next(); auto cf=QFileInfo(f).canonicalFilePath(); if(cf.isEmpty()||!isWithin(root,cf)||projectFiles.contains(cf)) continue; append(QJsonObject{{"id",hashId("custom:",cf)},{"title",QFileInfo(cf).completeBaseName()},{"type","video"},{"file",cf},{"preview",QString()},{"tags",QJsonArray{}},{"properties",QJsonObject{}},{"source","custom"},{"root",root}}); } }
   r.watchDirs.removeDuplicates(); r.vdfParsePaths.removeDuplicates(); r.vdfWatchPaths.removeDuplicates(); return r;
 }
 
@@ -431,6 +573,71 @@ class Daemon : public QObject {
     }
   }
 
+  void steamInstallFinished(QProcess *process, const QString &workshopId,
+                            const QPointer<QLocalSocket> &socket,
+                            const QJsonValue &requestId, bool hadId, int exitCode) {
+    const QString output = QString::fromUtf8(process->readAll());
+    process->deleteLater();
+    steamInstalls_.remove(workshopId);
+    Client *target = nullptr;
+    for (auto *candidate : clients_) {
+      if (candidate->socket == socket) { target = candidate; break; }
+    }
+    const bool ok =
+        output.contains(QStringLiteral("Success. Downloaded item"),
+                        Qt::CaseInsensitive) ||
+        (exitCode == 0 && output.contains(QStringLiteral("Success"), Qt::CaseInsensitive));
+    if (!ok) {
+      QString reason = QStringLiteral("steamcmd no completó la descarga");
+      const auto lines = output.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+      for (const auto &line : lines) {
+        if (line.contains(QStringLiteral("Failure"), Qt::CaseInsensitive) ||
+            line.contains(QStringLiteral("ERROR"), Qt::CaseInsensitive)) {
+          reason = line.trimmed().left(200);
+          break;
+        }
+      }
+      if (hadId && target) error(target, requestId, -32001, reason);
+      return;
+    }
+    // Symlink de lo descargado en una carpeta custom del catálogo.
+    const QString quark = QStringLiteral("/steamapps/workshop/content/431960/") + workshopId;
+    const QString home = QDir::homePath();
+    const QStringList roots{home + "/.steam/steamcmd", home + "/.steam/steam/steamcmd",
+                            home + "/.local/share/Steam/steamcmd", home + "/Steam/steamcmd"};
+    QString downloaded;
+    for (const auto &root : roots) {
+      const QString candidate = canonicalDir(root + quark);
+      if (!candidate.isEmpty()) { downloaded = candidate; break; }
+    }
+    QString linked;
+    const QString imports = sddmConfigDir() + "/steam-imports";
+    if (!downloaded.isEmpty()) {
+      QDir().mkpath(imports);
+      linked = imports + "/" + workshopId;
+      QFile::remove(linked);
+      if (!QFile::link(downloaded, linked)) linked.clear();
+    }
+    if (!downloadsLinkedFolder(imports)) {
+      Settings candidate = settings_;
+      candidate.customFolders << imports;
+      QString saveError;
+      if (store_.save(candidate, &saveError)) {
+        settings_ = candidate;
+        settings_.corrupt = false;
+      }
+    }
+    refreshAsync();
+    if (hadId && target) {
+      response(target, requestId, QJsonObject{{"id", workshopId}, {"installed", true},
+                                              {"path", downloaded}, {"linked", linked}});
+    }
+  }
+
+  bool downloadsLinkedFolder(const QString &imports) const {
+    return settings_.customFolders.contains(imports);
+  }
+
   QJsonObject catalogItem(const QString &id) const {
     for (const auto value : catalog_) {
       const auto item = value.toObject();
@@ -671,6 +878,10 @@ class Daemon : public QObject {
         fail(-32602, "id and output are required");
         return;
       }
+      if (!PlasmaWallpaperActivator::isCanonicalOutputRequest(output)) {
+        fail(-32602, "output must not contain leading or trailing whitespace");
+        return;
+      }
       const QJsonObject item = catalogItem(idValue);
       if (item.isEmpty()) {
         fail(-32602, "unknown wallpaper id");
@@ -678,11 +889,40 @@ class Daemon : public QObject {
       }
       RendererOptions options{qBound(1, settings_.fpsCap, 60), settings_.defaultVolume,
                               settings_.wallpaperScaleMode};
+      const QJsonArray waylandOutputs = listWaylandOutputs();
+      const QString connectedOutput = PlasmaWallpaperActivator::connectedOutputIdentity(
+          output, waylandOutputs);
+      PlasmaActivationPlan plasmaPlan;
+      std::optional<PlasmaDbusTransport> plasmaTransport;
+      std::optional<PlasmaWallpaperActivator> plasmaActivator;
+      if (!connectedOutput.isEmpty()) {
+        plasmaTransport.emplace();
+        plasmaActivator.emplace(&*plasmaTransport);
+        QString plasmaError;
+        if (!plasmaActivator->preflight(connectedOutput, options.scaleMode,
+                                        &plasmaPlan, &plasmaError)) {
+          fail(-32003, QStringLiteral("Plasma activation mapping unavailable: %1").arg(plasmaError));
+          return;
+        }
+        if (!PlasmaWallpaperActivator::mappingsMatchWaylandOutputs(
+                plasmaPlan.mappingsBefore, waylandOutputs, &plasmaError)) {
+          fail(-32003, QStringLiteral("Plasma activation mapping unavailable: %1").arg(plasmaError));
+          return;
+        }
+      }
       QString applyError;
       int applyCode = -32001;
       if (!renderers_->apply(item, output, options, &applyError, &applyCode)) {
         fail(applyCode, applyError);
         return;
+      }
+      if (plasmaActivator) {
+        QString plasmaError;
+        if (!plasmaActivator->commit(plasmaPlan, &plasmaError)) {
+          renderers_->stop(connectedOutput);
+          fail(-32003, QStringLiteral("Plasma activation failed after renderer apply: %1").arg(plasmaError));
+          return;
+        }
       }
       reply(QJsonObject{{"id", idValue}, {"output", output},
                         {"safeMode", renderers_->safeMode(output)}});
@@ -722,6 +962,228 @@ class Daemon : public QObject {
                         {"safeMode", renderers_->safeMode(output)}});
       return;
     }
+    if (method == "sddm.snapshot") {
+      if (!requireObject()) return;
+      const auto manager = detectDisplayManager();
+      const auto managerError = [&manager](const QString &detail) {
+        return QStringLiteral("%1: %2").arg(displayManagerLabel(manager.kind), detail);
+      };
+      const auto object = params.isObject() ? params.toObject() : QJsonObject{};
+      const QJsonValue requireActiveValue = object.value("requireActive");
+      // This is deliberately an opt-in, one-way flag: older callers that omit
+      // it retain the historical fallback behaviour, while callers that opt
+      // in cannot silently turn the guard back off with `false`.
+      if (!requireActiveValue.isUndefined() &&
+          (!requireActiveValue.isBool() || !requireActiveValue.toBool())) {
+        fail(-32602, managerError("requireActive debe ser true cuando se incluye"));
+        return;
+      }
+      const bool requireActive = requireActiveValue.isBool();
+      QDir().mkpath(sddmConfigDir());
+      QString dest = sddmConfigDir() + "/sddm-background.png";
+      if (object.value("destPath").isString() &&
+          !object.value("destPath").toString().trimmed().isEmpty()) {
+        const QString requested = QDir::cleanPath(object.value("destPath").toString().trimmed());
+        const QString root = canonicalDir(sddmConfigDir());
+        if (requested.isEmpty() || !QDir::isAbsolutePath(requested) ||
+            !requested.endsWith(QStringLiteral(".png"), Qt::CaseInsensitive) ||
+            root.isEmpty() || !isWithin(root, requested)) {
+          fail(-32602, managerError("destPath debe ser un .png dentro de ~/.config/anispaper"));
+          return;
+        }
+        dest = requested;
+      }
+      const QString requestedOutput = object.value("output").toString().trimmed();
+      QImage frame;
+      QString usedOutput = requestedOutput;
+      if (requireActive) {
+        if (requestedOutput.isEmpty()) {
+          fail(-32602, managerError("output es obligatorio cuando requireActive es true"));
+          return;
+        }
+        frame = renderers_->lastFrame(requestedOutput);
+        if (frame.isNull()) {
+          fail(-32001, managerError(
+              QStringLiteral("no hay renderer/frame activo para el output solicitado (%1); no se usó fallback")
+                  .arg(requestedOutput)));
+          return;
+        }
+      } else if (!requestedOutput.isEmpty()) {
+        frame = renderers_->lastFrame(requestedOutput);
+      }
+      if (!requireActive && frame.isNull()) {
+        for (const auto &monitor : listWaylandOutputs()) {
+          const QString name = monitor.toObject().value("name").toString();
+          frame = renderers_->lastFrame(name);
+          if (!frame.isNull()) { usedOutput = name; break; }
+        }
+      }
+      // Legacy callers without requireActive still receive the historical
+      // fallback image. Strict callers returned above instead.
+      if (!requireActive && frame.isNull()) {
+        frame = StaticImageRenderer::defaultFrame(1920, 1080);
+        usedOutput.clear();
+      }
+      QSaveFile file(dest);
+      if (!file.open(QIODevice::WriteOnly) || !frame.save(&file, "PNG") ||
+          !file.commit()) {
+        fail(-32603, managerError("no se pudo escribir el PNG de SDDM"));
+        return;
+      }
+      reply(QJsonObject{{"path", dest}, {"width", frame.width()},
+                        {"height", frame.height()}, {"output", usedOutput},
+                        {"manager", displayManagerId(manager.kind)},
+                        {"managerLabel", displayManagerLabel(manager.kind)},
+                        {"managerUnit", manager.unit},
+                        {"scope", "display-manager-greeter"},
+                        {"lockScreenChanged", false}});
+      return;
+    }
+    if (method == "sddm.installTheme") {
+      if (!requireObject()) return;
+      const auto manager = detectDisplayManager();
+      if (manager.kind == DisplayManagerKind::Unknown) {
+        fail(-32004,
+             QStringLiteral("display manager=unknown: no supported display manager was detected; "
+                            "refusing SDDM installation and making no changes"));
+        return;
+      }
+      const auto managerError = [&manager](const QString &detail) {
+        return QStringLiteral("%1: %2").arg(displayManagerLabel(manager.kind), detail);
+      };
+      const QString png = sddmConfigDir() + "/sddm-background.png";
+      if (!QFileInfo(png).isFile()) {
+        fail(-32001, managerError("no hay captura: ejecutá sddm.snapshot primero"));
+        return;
+      }
+      if (manager.kind == DisplayManagerKind::PlasmaLogin) {
+        QString plasmaError;
+        if (!installPlasmaLoginWallpaper(png, &plasmaError)) {
+          fail(-32004, plasmaError);
+          return;
+        }
+        reply(QJsonObject{{"theme", "org.kde.image"},
+                          {"installed", true},
+                          {"manager", displayManagerId(manager.kind)},
+                          {"managerLabel", displayManagerLabel(manager.kind)},
+                          {"managerUnit", manager.unit},
+                          {"route", "org.kde.kcontrol.kcmplasmalogin.save"},
+                          {"scope", "display-manager-greeter"},
+                          {"lockScreenChanged", false}});
+        return;
+      }
+      const QString stage = sddmConfigDir() + "/sddm-theme/anis-star";
+      QDir(stage).removeRecursively();
+      const QString base = activeSddmThemeDir();
+      if (base.isEmpty() || !copyRecursive(base, stage)) {
+        fail(-32001, managerError("no se encontró un tema base de SDDM copiable"));
+        return;
+      }
+      if (!QFile::copy(png, stage + "/background.png")) {
+        fail(-32603, managerError("no se pudo copiar el fondo al tema staged"));
+        return;
+      }
+      // Mantener el Main.qml del tema base; solo reemplazar el fondo.
+      const QString confPath = stage + "/theme.conf";
+      QString conf;
+      {
+        QFile in(confPath);
+        if (in.open(QIODevice::ReadOnly | QIODevice::Text)) {
+          conf = QString::fromUtf8(in.readAll());
+        }
+      }
+      const QRegularExpression bg(QStringLiteral("(?m)^background=.*$"));
+      if (bg.match(conf).hasMatch()) {
+        conf.replace(bg, QStringLiteral("background=background.png"));
+      } else if (conf.contains(QStringLiteral("[General]"))) {
+        conf.replace(QStringLiteral("[General]"),
+                     QStringLiteral("[General]\ntype=image\nbackground=background.png"));
+      } else {
+        conf = QStringLiteral("[General]\ntype=image\ncolor=#0A0D14\nbackground=background.png\n");
+      }
+      {
+        QSaveFile out(confPath);
+        if (!out.open(QIODevice::WriteOnly) || out.write(conf.toUtf8()) < 0 ||
+            !out.commit()) {
+          fail(-32603, managerError("no se pudo escribir theme.conf del tema staged"));
+          return;
+        }
+      }
+      const QString helper = resolveSddmHelper();
+      if (helper.isEmpty()) {
+        fail(-32001, managerError("helper anispaper-sddm-install no encontrado o sin permiso de ejecución"));
+        return;
+      }
+      QProcess process;
+      process.start(QStringLiteral("pkexec"), {helper, stage});
+      if (!process.waitForStarted(15000)) {
+        fail(-32001, managerError("pkexec no arrancó"));
+        return;
+      }
+      if (!process.waitForFinished(180000) ||
+          process.exitStatus() != QProcess::NormalExit ||
+          process.exitCode() != 0) {
+        fail(-32001, managerError("pkexec fue cancelado o falló (" +
+                          QString::number(process.exitCode()) + ")"));
+        return;
+      }
+      reply(QJsonObject{{"theme", "anis-star"},
+                        {"installed", true}, {"staged", stage},
+                        {"manager", displayManagerId(manager.kind)},
+                        {"managerLabel", displayManagerLabel(manager.kind)},
+                        {"managerUnit", manager.unit},
+                        {"scope", "display-manager-greeter"},
+                        {"lockScreenChanged", false}});
+      return;
+    }
+    if (method == "steam.install") {
+      if (!params.isObject() || !params.toObject().value("id").isString()) {
+        fail(-32602, "invalid params");
+        return;
+      }
+      QString workshopId = params.toObject().value("id").toString().trimmed();
+      if (workshopId.startsWith(QStringLiteral("steam:"))) workshopId = workshopId.mid(6);
+      static const QRegularExpression idRx(QStringLiteral("^\\d{1,20}$"));
+      if (!idRx.match(workshopId).hasMatch()) {
+        fail(-32602, "id debe ser numérico");
+        return;
+      }
+      const auto envCmd = qEnvironmentVariable("ANISPAPER_STEAMCMD");
+      const QString steamcmd = !envCmd.isEmpty()
+          ? envCmd
+          : QStandardPaths::findExecutable(QStringLiteral("steamcmd"));
+      if (steamcmd.isEmpty()) {
+        fail(-32001, "steamcmd no está instalado (yay -S steamcmd)");
+        return;
+      }
+      if (steamInstalls_.contains(workshopId)) {
+        fail(-32000, "ya hay una descarga en curso para ese id");
+        return;
+      }
+      auto *process = new QProcess(this);
+      steamInstalls_.insert(workshopId, process);
+      QPointer<QLocalSocket> socketGuard = client->socket;
+      const QJsonValue requestId = id;
+      const bool hadId = hasId;
+      auto *daemonThis = this;
+      QObject::connect(process, &QProcess::finished, this,
+                       [daemonThis, process, workshopId, socketGuard, requestId,
+                        hadId](int exitCode, QProcess::ExitStatus) {
+                         daemonThis->steamInstallFinished(process, workshopId, socketGuard,
+                                                          requestId, hadId, exitCode);
+                       });
+      process->start(steamcmd, {QStringLiteral("+login"), QStringLiteral("anonymous"),
+                                QStringLiteral("+workshop_download_item"),
+                                QStringLiteral("431960"), workshopId,
+                                QStringLiteral("+quit")});
+      if (!process->waitForStarted(10000)) {
+        steamInstalls_.remove(workshopId);
+        process->deleteLater();
+        fail(-32001, "steamcmd no arrancó");
+        return;
+      }
+      return;  // la respuesta llega cuando steamcmd termina (async)
+    }
     fail(-32601, "method not found");
   }
 
@@ -743,6 +1205,7 @@ class Daemon : public QObject {
   Watcher watcher_;
   QThreadPool pool_;
   RendererManager *renderers_ = nullptr;
+  QHash<QString, QProcess *> steamInstalls_;
   bool scanning_ = false;
   bool queuedRefresh_ = false;
   quint64 generation_ = 0;

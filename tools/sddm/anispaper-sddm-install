@@ -1,0 +1,389 @@
+#!/bin/bash
+# Install the one SDDM theme staged by anis-paperd.
+#
+# Normal invocation is intentionally narrow: pkexec supplies PKEXEC_UID and
+# anis-paperd supplies exactly ~/.config/anispaper/sddm-theme/anis-star for
+# that account.  --validate is a non-privileged, no-write mode used by tests.
+
+set -euo pipefail
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 077
+
+readonly THEME_NAME='anis-star'
+readonly THEME_PARENT='/usr/local/share/sddm/themes'
+readonly THEME_TARGET="${THEME_PARENT}/${THEME_NAME}"
+readonly CONFIG_DIR='/etc/sddm.conf.d'
+readonly CONFIG_FILE="${CONFIG_DIR}/${THEME_NAME}.conf"
+# Resolve tools after installing a fixed PATH.  `type -P` deliberately ignores
+# shell functions, so the privileged parent never dispatches an imported one.
+readonly RUNUSER_BIN="$(type -P runuser || true)"
+readonly COPY_BIN="$(type -P cp || true)"
+
+work_dir=''
+backup_dir=''
+config_tmp=''
+old_theme_backed_up=0
+new_theme_installed=0
+committed=0
+initiator_uid=''
+initiator_gid=''
+initiator_user=''
+initiator_home_dir=''
+work_dir_handed_to_initiator=0
+
+usage() {
+  printf '%s\n' \
+    "usage: ${0##*/} <staged-anis-star-directory>" \
+    "       ${0##*/} --validate <staged-anis-star-directory>" >&2
+}
+
+die() {
+  printf '%s\n' "anispaper-sddm-install: $*" >&2
+  exit 1
+}
+
+warn() {
+  printf '%s\n' "anispaper-sddm-install: warning: $*" >&2
+}
+
+canonical_existing() {
+  local path=$1
+  realpath -e -- "$path"
+}
+
+# The staged theme must contain only ordinary directories and regular files.
+# find -P prevents traversal through a symlink even if one appears below the
+# root while validation is running.
+validate_tree() {
+  local tree=$1
+  local unexpected=''
+
+  [[ "$tree" == /* ]] || {
+    printf '%s\n' 'staged theme path must be absolute' >&2
+    return 1
+  }
+  [[ -d "$tree" && ! -L "$tree" ]] || {
+    printf '%s\n' 'staged theme must be a real directory, not a symlink' >&2
+    return 1
+  }
+
+  if ! unexpected="$(find -P -- "$tree" -type l -print -quit)"; then
+    printf '%s\n' 'could not inspect staged theme for symlinks' >&2
+    return 1
+  fi
+  [[ -z "$unexpected" ]] || {
+    printf '%s\n' 'staged theme contains a symlink' >&2
+    return 1
+  }
+
+  if ! unexpected="$(find -P -- "$tree" ! \( -type d -o -type f \) -print -quit)"; then
+    printf '%s\n' 'could not inspect staged theme file types' >&2
+    return 1
+  fi
+  [[ -z "$unexpected" ]] || {
+    printf '%s\n' 'staged theme contains a non-regular file' >&2
+    return 1
+  }
+
+  # A hard link can turn later root ownership/mode changes into changes to an
+  # inode outside this tree.  Themes have no legitimate need for hard links.
+  if ! unexpected="$(find -P -- "$tree" -type f -links +1 -print -quit)"; then
+    printf '%s\n' 'could not inspect staged theme link counts' >&2
+    return 1
+  fi
+  [[ -z "$unexpected" ]] || {
+    printf '%s\n' 'staged theme contains a hard-linked file' >&2
+    return 1
+  }
+}
+
+validate_theme() {
+  local tree=$1
+  local required=''
+
+  validate_tree "$tree" || return 1
+  for required in theme.conf background.png; do
+    if [[ -L "$tree/$required" || ! -f "$tree/$required" ]]; then
+      printf '%s\n' "staged theme is missing regular $required" >&2
+      return 1
+    fi
+  done
+}
+
+resolve_initiator() {
+  local uid=${PKEXEC_UID:-}
+  local passwd_entry=''
+  local account=''
+
+  case "$uid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+
+  if ! passwd_entry="$(getent passwd "$uid")"; then
+    return 1
+  fi
+  account="$(printf '%s\n' "$passwd_entry" | awk -F: -v uid="$uid" \
+    '$3 == uid { printf "%s\\t%s\\t%s\\t%s\\n", $1, $3, $4, $6; exit }')"
+  IFS=$'\t' read -r initiator_user initiator_uid initiator_gid initiator_home_dir <<<"$account"
+
+  [[ -n "$initiator_user" && "$initiator_uid" == "$uid" ]] || return 1
+  case "$initiator_gid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [[ "$initiator_home_dir" == /* ]] || return 1
+}
+
+# pkexec does not forward a trustworthy XDG_CONFIG_HOME.  The daemon/helper
+# contract deliberately uses the initiating account's default config path.
+validate_production_stage() {
+  local stage=$1
+  local home=''
+  local expected=''
+  local config_root=''
+  local expected_real=''
+  local stage_real=''
+  local component=''
+
+  resolve_initiator || die 'PKEXEC_UID must identify a local account'
+  home=$initiator_home_dir
+  expected="$home/.config/anispaper/sddm-theme/$THEME_NAME"
+  config_root="$home/.config/anispaper"
+
+  # This is stricter than merely accepting a child of the config directory:
+  # there is one staged theme and its name is part of the RPC contract.
+  [[ "$stage" == "$expected" ]] || die 'refusing a staged theme outside the initiating user config path'
+
+  # Do not allow an ancestor under the controlled config root to redirect the
+  # privileged copy somewhere else.
+  for component in \
+    "$home/.config" \
+    "$config_root" \
+    "$config_root/sddm-theme" \
+    "$expected"; do
+    [[ ! -L "$component" ]] || die 'refusing a symlink in the staged theme path'
+  done
+
+  expected_real="$(canonical_existing "$expected")" || die 'staged theme path does not exist'
+  stage_real="$(canonical_existing "$stage")" || die 'could not canonicalize staged theme path'
+  [[ "$stage_real" == "$expected_real" ]] || die 'staged theme path escapes its expected location'
+  case "$stage_real" in
+    "$(canonical_existing "$config_root")/sddm-theme/$THEME_NAME") ;;
+    *) die 'staged theme path escapes the initiating user config root' ;;
+  esac
+
+  validate_theme "$stage"
+}
+
+ensure_system_directory() {
+  local directory=$1
+
+  if [[ -e "$directory" || -L "$directory" ]]; then
+    [[ -d "$directory" && ! -L "$directory" ]] || die "refusing non-directory destination $directory"
+  else
+    mkdir -p -- "$directory" || die "could not create destination $directory"
+    chmod 0755 -- "$directory" || die "could not set mode on $directory"
+  fi
+}
+
+normalize_snapshot() {
+  local snapshot=$1
+
+  # This runs only after copying into a root-owned mktemp directory.  It keeps
+  # the installed SDDM assets root-owned and prevents writable staged modes
+  # from persisting in a privileged theme location.
+  chown -R --no-dereference 0:0 -- "$snapshot" || return 1
+  find -P -- "$snapshot" -type d -exec chmod 0755 -- {} + || return 1
+  find -P -- "$snapshot" -type f -exec chmod 0644 -- {} + || return 1
+}
+
+copy_stage_as_initiator() {
+  local stage=$1
+  local destination=$2
+
+  [[ -n "$RUNUSER_BIN" && -x "$RUNUSER_BIN" ]] || return 1
+  [[ -n "$COPY_BIN" && -x "$COPY_BIN" ]] || return 1
+  "$RUNUSER_BIN" --user "$initiator_user" -- \
+    "$COPY_BIN" -R -P -- "$stage" "$destination"
+}
+
+handoff_work_directory() {
+  chmod 0700 -- "$work_dir" && \
+    chown "$initiator_uid:$initiator_gid" -- "$work_dir"
+}
+
+reclaim_work_directory() {
+  # Reclaim the top directory first: its mode is 0700, so the initiating user
+  # loses path access before root examines any child created by the copy.
+  chown 0:0 -- "$work_dir" && chmod 0700 -- "$work_dir"
+}
+
+safe_remove_owned_directory() {
+  local directory=$1
+
+  # Never accept a caller-provided deletion target.  The only removable trees
+  # are the fixed installed theme or mktemp directories created in this run.
+  [[ -n "$directory" ]] || return 1
+  [[ "$directory" == "$THEME_TARGET" || "$directory" == "$work_dir" || "$directory" == "$backup_dir" ]] || return 1
+  if [[ -e "$directory" || -L "$directory" ]]; then
+    [[ -d "$directory" && ! -L "$directory" ]] || return 1
+    rm -rf -- "$directory"
+  fi
+}
+
+rollback_theme() {
+  local saved_theme=''
+
+  if (( new_theme_installed )); then
+    if ! safe_remove_owned_directory "$THEME_TARGET"; then
+      warn "could not remove incomplete $THEME_TARGET during rollback"
+      return 1
+    fi
+    new_theme_installed=0
+  fi
+
+  if (( old_theme_backed_up )); then
+    saved_theme="$backup_dir/$THEME_NAME"
+    if [[ ! -d "$saved_theme" || -L "$saved_theme" ]]; then
+      warn 'could not find the previous SDDM theme for rollback'
+      return 1
+    fi
+    if [[ -e "$THEME_TARGET" || -L "$THEME_TARGET" ]]; then
+      warn "refusing to overwrite an unexpected $THEME_TARGET during rollback"
+      return 1
+    fi
+    if ! mv -- "$saved_theme" "$THEME_TARGET"; then
+      warn 'could not restore the previous SDDM theme'
+      return 1
+    fi
+    old_theme_backed_up=0
+  fi
+}
+
+cleanup_on_exit() {
+  local status=$?
+  trap - EXIT HUP INT TERM
+
+  if (( work_dir_handed_to_initiator )); then
+    reclaim_work_directory || \
+      warn "could not reclaim temporary SDDM theme directory $work_dir during cleanup"
+    work_dir_handed_to_initiator=0
+  fi
+  if (( status != 0 && committed == 0 )); then
+    rollback_theme || true
+  fi
+  if [[ -n "$config_tmp" && ( -e "$config_tmp" || -L "$config_tmp" ) ]]; then
+    rm -f -- "$config_tmp" || warn "could not remove temporary config $config_tmp"
+  fi
+  if [[ -n "$work_dir" ]]; then
+    safe_remove_owned_directory "$work_dir" || \
+      warn "could not remove temporary theme directory $work_dir"
+  fi
+  if [[ -n "$backup_dir" && committed == 0 ]]; then
+    safe_remove_owned_directory "$backup_dir" || \
+      warn "could not remove backup directory $backup_dir"
+  fi
+  exit "$status"
+}
+
+main() {
+  local stage=''
+  local snapshot=''
+  local copy_failed=0
+
+  if [[ ${1:-} == '--validate' ]]; then
+    [[ $# -eq 2 ]] || {
+      usage
+      return 1
+    }
+    validate_theme "$2"
+    printf '%s\n' 'valid staged SDDM theme'
+    return 0
+  fi
+
+  [[ $# -eq 1 ]] || {
+    usage
+    return 1
+  }
+  [[ ${EUID:-$(id -u)} -eq 0 ]] || die 'normal invocation must run as root via pkexec'
+  [[ -n ${PKEXEC_UID:-} ]] || die 'normal invocation requires PKEXEC_UID from pkexec'
+
+  stage=$1
+  validate_production_stage "$stage"
+  ensure_system_directory "$THEME_PARENT"
+  ensure_system_directory "$CONFIG_DIR"
+
+  if [[ -e "$CONFIG_FILE" || -L "$CONFIG_FILE" ]]; then
+    [[ -f "$CONFIG_FILE" && ! -L "$CONFIG_FILE" ]] || \
+      die "refusing non-regular destination $CONFIG_FILE"
+  fi
+  if [[ -e "$THEME_TARGET" || -L "$THEME_TARGET" ]]; then
+    [[ -d "$THEME_TARGET" && ! -L "$THEME_TARGET" ]] || \
+      die "refusing non-directory destination $THEME_TARGET"
+    validate_tree "$THEME_TARGET" || die "refusing unsafe existing destination $THEME_TARGET"
+  fi
+
+  work_dir="$(mktemp -d "${THEME_PARENT}/.anispaper-sddm.XXXXXX")" || \
+    die 'could not create temporary SDDM theme directory'
+  trap cleanup_on_exit EXIT
+  trap 'exit 1' HUP INT TERM
+
+  # Never read mutable staged file contents as root.  The initiating account
+  # copies into this one freshly-created directory; root reclaims its 0700
+  # parent before inspecting the resulting snapshot.
+  handoff_work_directory || die 'could not hand temporary SDDM theme directory to initiating user'
+  work_dir_handed_to_initiator=1
+  if ! copy_stage_as_initiator "$stage" "$work_dir"; then
+    copy_failed=1
+  fi
+  reclaim_work_directory || die 'could not reclaim temporary SDDM theme directory from initiating user'
+  work_dir_handed_to_initiator=0
+  if (( copy_failed )); then
+    die 'initiating user could not copy staged SDDM theme'
+  fi
+  snapshot="$work_dir/$THEME_NAME"
+  # The mutable-stage check above is only an early rejection path.  This
+  # post-reclaim validation is the authoritative gate for installation.
+  validate_theme "$snapshot" || die 'copied SDDM theme failed validation'
+  normalize_snapshot "$snapshot" || die 'could not normalize copied SDDM theme permissions'
+
+  if [[ -e "$THEME_TARGET" || -L "$THEME_TARGET" ]]; then
+    backup_dir="$(mktemp -d "${THEME_PARENT}/.anis-star-backup.XXXXXX")" || \
+      die 'could not create SDDM theme backup directory'
+    if ! mv -- "$THEME_TARGET" "$backup_dir/$THEME_NAME"; then
+      die 'could not back up the existing SDDM theme'
+    fi
+    old_theme_backed_up=1
+  fi
+  if ! mv -- "$snapshot" "$THEME_TARGET"; then
+    die 'could not atomically install the SDDM theme'
+  fi
+  new_theme_installed=1
+
+  config_tmp="$(mktemp "${CONFIG_DIR}/.anis-star.conf.XXXXXX")" || \
+    die 'could not create temporary SDDM config'
+  if ! printf '[Theme]\nCurrent=%s\n' "$THEME_NAME" >"$config_tmp"; then
+    die 'could not write temporary SDDM config'
+  fi
+  chmod 0644 -- "$config_tmp" || die 'could not set SDDM config permissions'
+  if ! mv -f -- "$config_tmp" "$CONFIG_FILE"; then
+    die 'could not atomically install SDDM config'
+  fi
+  config_tmp=''
+  committed=1
+
+  if [[ -n "$backup_dir" ]]; then
+    safe_remove_owned_directory "$backup_dir" || \
+      warn "installed new theme but could not remove backup $backup_dir"
+    backup_dir=''
+  fi
+  if ! rmdir -- "$work_dir"; then
+    warn "installed new theme but could not remove empty work directory $work_dir"
+  fi
+  work_dir=''
+
+  printf '%s\n' 'installed SDDM theme anis-star'
+}
+
+main "$@"

@@ -14,6 +14,47 @@ import time
 
 
 DAEMON = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else None
+REPO = pathlib.Path(__file__).resolve().parents[1]
+
+
+def verify_ui_dp2_payload():
+    source = (REPO / "ui/src/App.tsx").read_text(encoding="utf-8")
+    select_contract = (
+        '<option key={monitor.name} value={monitor.name}>' in source and
+        'onChange={(event) => setSelectedOutput(event.target.value)}' in source
+    )
+    apply_contract = (
+        'window.anispaper.rpc("wallpaper.apply", { id: selected.id, output: selectedOutput })'
+        in source
+    )
+    require(select_contract and apply_contract,
+            "UI no conserva monitor.name hasta wallpaper.apply output")
+    # This is the exact data-flow instantiated for the requested connector:
+    # monitor.name -> option.value -> event.target.value -> selectedOutput.
+    selected_output = "DP-2"
+    payload = {"id": "steam:400", "output": selected_output}
+    require(payload["output"] == "DP-2", f"UI DP-2 payload changed: {payload}")
+
+
+def verify_preview_throttle_does_not_gate_apply():
+    source = (REPO / "ui/electron/main.ts").read_text(encoding="utf-8")
+    require(
+        'if (method === "preview.frame"' in source and
+        'return this.callPreview<T>(params.output, params);' in source and
+        'return this.callRaw<T>(method, params);' in source,
+        "preview throttle is not isolated to preview.frame"
+    )
+    require(
+        'const PREVIEW_UNAVAILABLE_RETRY_MS = 750;' in source and
+        'this.previewInFlight.get(output)' in source and
+        'this.previewDelay.set(output, { timer, reject });' in source,
+        "preview backoff no longer deduplicates one probe per output"
+    )
+    require(
+        'this.cancelPreviewDelays("La aplicación se está cerrando.");' in source and
+        'this.cancelPreviewDelays(message);' in source,
+        "delayed preview probes are not cancelled on stop/disconnect"
+    )
 
 
 def require(condition, message):
@@ -99,22 +140,70 @@ def write_fixture(root):
          "-frames:v", "1", str(preview)],
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
+    large_preview = item / "preview-large.png"
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=#ff6b8b:size=1600x900",
+         "-frames:v", "1", str(large_preview)],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
     # scene.json is deliberately absent: metadata is still safe/catalogued and
     # the F4 fallback must use preview.jpg rather than attempting extraction.
     (item / "project.json").write_text(json.dumps({
-        "title": "F4 scene fallback",
+        "title": "F4 scene fallback DP-2",
         "type": "Scene",
         "file": "scene.json",
         "preview": "preview.jpg",
         "general": {"properties": {}},
     }), encoding="utf-8")
+
+    control = steam / "steamapps/workshop/content/431960/401"
+    control.mkdir(parents=True)
+    control_preview = control / "preview-control.png"
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=#55d86a:size=1280x720",
+         "-frames:v", "1", str(control_preview)],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    (control / "project.json").write_text(json.dumps({
+        "title": "F4 scene directory source",
+        "type": "Scene",
+        "file": "scene.json",
+        "preview": "preview-control.png",
+        "general": {"properties": {}},
+    }), encoding="utf-8")
+    (control / "scene.json").mkdir()
+
+    empty = steam / "steamapps/workshop/content/431960/402"
+    empty.mkdir(parents=True)
+    (empty / "scene.json").touch()
+    (empty / "project.json").write_text(json.dumps({
+        "title": "F4 empty scene source",
+        "type": "Scene",
+        "file": "scene.json",
+        "general": {"properties": {}},
+    }), encoding="utf-8")
+
+    valid = steam / "steamapps/workshop/content/431960/403"
+    valid.mkdir(parents=True)
+    (valid / "scene.json").write_text("{}", encoding="utf-8")
+    (valid / "project.json").write_text(json.dumps({
+        "title": "F4 valid scene source",
+        "type": "Scene",
+        "file": "scene.json",
+        "preview": "preview.jpg",
+        "general": {"properties": {}},
+    }), encoding="utf-8")
+    shutil.copy2(preview, valid / "preview.jpg")
+
     vdf = steam / "steamapps/libraryfolders.vdf"
     vdf.parent.mkdir(parents=True, exist_ok=True)
     vdf.write_text(f'"libraryfolders" {{ "0" {{ "path" "{steam}" }} }}', encoding="utf-8")
-    return vdf
+    return vdf, large_preview.resolve(), control_preview.resolve()
 
 
 def main():
+    verify_ui_dp2_payload()
+    verify_preview_throttle_does_not_gate_apply()
     require(DAEMON and DAEMON.is_file(), "usage: f4_integration.py daemon")
     with tempfile.TemporaryDirectory(prefix="anispaper-f4-") as temp:
         root = pathlib.Path(temp)
@@ -127,11 +216,12 @@ def main():
         config = root / "config"
         runtime.mkdir()
         config.mkdir()
+        vdf, large_preview, control_preview = write_fixture(root)
         env = os.environ.copy()
         env.update({
             "XDG_RUNTIME_DIR": str(runtime),
             "XDG_CONFIG_HOME": str(config),
-            "ANISPAPER_STEAM_VDF": str(write_fixture(root)),
+            "ANISPAPER_STEAM_VDF": str(vdf),
         })
         process = subprocess.Popen([str(daemon)], env=env, text=True,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -148,38 +238,119 @@ def main():
 
             wait_for("catalog scan", catalog_ready)
             catalog = {item["id"]: item for item in rpc.call("catalog.list")}
-            item = catalog.get("steam:400")
-            require(item and item["type"] == "scene" and not pathlib.Path(item["file"]).exists(),
-                    f"scene fixture was not catalogued as a missing-source scene: {item}")
-            rpc.call("wallpaper.apply", {"id": "steam:400", "output": output})
+            missing_item = catalog.get("steam:400")
+            directory_item = catalog.get("steam:401")
+            empty_item = catalog.get("steam:402")
+            valid_item = catalog.get("steam:403")
+            require(missing_item and missing_item["type"] == "scene" and
+                    not pathlib.Path(missing_item["file"]).exists(),
+                    f"missing scene fixture was not catalogued: {missing_item}")
+            require(missing_item["preview"] == str(large_preview),
+                    "catalog did not select the largest readable preview: " +
+                    repr(missing_item.get("preview")))
+            require(directory_item and pathlib.Path(directory_item["file"]).is_dir(),
+                    f"directory scene fixture was not catalogued: {directory_item}")
+            require(empty_item and pathlib.Path(empty_item["file"]).is_file() and
+                    pathlib.Path(empty_item["file"]).stat().st_size == 0,
+                    f"empty scene fixture was not catalogued: {empty_item}")
+            require(valid_item and pathlib.Path(valid_item["file"]).read_text(encoding="utf-8") == "{}",
+                    f"valid scene fixture was not catalogued: {valid_item}")
+
+            def entry_for(status, name):
+                return next((entry for entry in status["renderers"]
+                             if entry["output"] == name), None)
+
+            def expect_invalid_scene(identifier, target, label, preserved=None):
+                try:
+                    rpc.call("wallpaper.apply", {"id": identifier, "output": target})
+                except RuntimeError as exc:
+                    message = str(exc)
+                else:
+                    raise RuntimeError(f"{label} scene apply unexpectedly succeeded")
+                require("'code': -32001" in message and "INVALID_WALLPAPER:" in message,
+                        f"{label} scene returned the wrong error: {message}")
+                status = rpc.call("status.get")
+                entry = entry_for(status, target)
+                if preserved is None:
+                    require(entry is None, f"{label} scene created an entry: {entry}")
+                else:
+                    require(entry and entry["wallpaperId"] == preserved and entry.get("hasFrame") and
+                            entry["crashes"] == 0 and entry["safeMode"] is False,
+                            f"{label} scene changed the active entry: {entry}")
+                require(status["watchdog"]["count"] == 0 and
+                        status["watchdog"]["safeMode"] is False,
+                        f"{label} scene touched watchdog state: {status['watchdog']}")
+
+            expect_invalid_scene("steam:400", "F4-MISSING", "missing")
+            rpc.call("wallpaper.apply", {"id": "steam:403", "output": output})
 
             def ready_scene():
                 status = rpc.call("status.get")
-                entry = next((item for item in status["renderers"]
-                              if item["output"] == output), None)
+                entry = entry_for(status, output)
                 if not entry or not entry.get("hasFrame"):
                     return None
                 return status, entry
 
-            status, entry = wait_for("scene fallback frame", ready_scene)
-            require(entry["renderer"] == "scene-static" and entry["fallback"] is True and
-                    entry["safeMode"] is False and entry["pid"] == 0,
-                    f"scene did not use static fallback: {entry}")
+            status, entry = wait_for("valid scene fallback frame", ready_scene)
+            require(entry["wallpaperId"] == "steam:403" and entry["renderer"] == "scene-static" and
+                    entry["fallback"] is True and entry["safeMode"] is False and entry["pid"] == 0,
+                    f"valid scene did not retain successful fallback behavior: {entry}")
             require(entry["sceneNativeSupported"] is False and
                     entry["badge"] == "scene sin soporte nativo",
-                    f"scene capability badge is invalid: {entry}")
+                    f"valid scene capability badge is invalid: {entry}")
             require(entry["bridge"]["active"] is True and entry["bridge"]["frameNo"] >= 2,
-                    f"scene did not publish a bridge frame: {entry}")
+                    f"valid scene did not publish a bridge frame: {entry}")
             preview = rpc.call("preview.frame", {"output": output})
             jpeg = base64.b64decode(preview["data"], validate=True)
             require(jpeg.startswith(b"\xff\xd8") and jpeg.endswith(b"\xff\xd9"),
-                    "scene fallback preview is not JPEG")
-            require(status["watchdog"]["count"] == 0 and
-                    status["watchdog"]["safeMode"] is False,
-                    f"scene fallback touched watchdog state: {status['watchdog']}")
+                    "valid scene fallback preview is not JPEG")
+            expect_invalid_scene("steam:401", output, "directory", "steam:403")
+            expect_invalid_scene("steam:402", output, "empty", "steam:403")
             require(rpc.call("wallpaper.stop", {"output": output})["stopped"] is True,
-                    "scene stop did not release the renderer")
-            print("f4_integration: missing-scene-source/static-preview/badge/bridge/preview assertions passed")
+                    "valid scene stop did not release the renderer")
+
+            # Multimonitor regression: synthetic connector names deliberately
+            # bypass Plasma mutation while exercising the daemon's exact
+            # by-output renderer and bridge maps. Applying a second wallpaper
+            # must not replace or unlink the first output.
+            target_output = "DP-2"
+            control_output = "HDMI-A-1"
+            control_item = catalog.get("steam:403")
+            require(control_item and pathlib.Path(control_item["file"]).is_file(),
+                    f"control scene fixture is invalid: {control_item}")
+            rpc.call("wallpaper.apply", {"id": "steam:403", "output": target_output})
+            rpc.call("wallpaper.apply", {"id": "steam:403", "output": control_output})
+
+            def both_outputs_active():
+                current = rpc.call("status.get")
+                entries = {entry["output"]: entry for entry in current["renderers"]}
+                dp = entries.get(target_output)
+                hdmi = entries.get(control_output)
+                if not dp or not hdmi or not dp.get("hasFrame") or not hdmi.get("hasFrame"):
+                    return None
+                return current, dp, hdmi
+
+            status, dp_entry, hdmi_entry = wait_for(
+                "independent DP-2 and HDMI-A-1 renderers/bridges", both_outputs_active)
+            require(dp_entry["wallpaperId"] == "steam:403" and
+                    hdmi_entry["wallpaperId"] == "steam:403",
+                    f"wallpapers crossed output maps: DP={dp_entry}, HDMI={hdmi_entry}")
+            require(dp_entry["bridge"]["active"] is True and
+                    dp_entry["bridge"]["name"] == "/anispaper-DP-2" and
+                    hdmi_entry["bridge"]["active"] is True and
+                    hdmi_entry["bridge"]["name"] == "/anispaper-HDMI-A-1",
+                    f"independent bridges were not retained: DP={dp_entry}, HDMI={hdmi_entry}")
+            require(rpc.call("wallpaper.stop", {"output": target_output})["stopped"] is True,
+                    "DP-2 renderer did not stop")
+            remaining = rpc.call("status.get")
+            remaining_hdmi = next((entry for entry in remaining["renderers"]
+                                   if entry["output"] == control_output), None)
+            require(remaining_hdmi and remaining_hdmi["bridge"]["active"] is True and
+                    remaining_hdmi["wallpaperId"] == "steam:403",
+                    f"stopping DP-2 removed HDMI-A-1 state: {remaining_hdmi}")
+            require(rpc.call("wallpaper.stop", {"output": control_output})["stopped"] is True,
+                    "HDMI-A-1 renderer did not stop")
+            print("f4_integration: fallback and DP-2/HDMI-A-1 independent renderer/bridge assertions passed")
             return 0
         finally:
             if rpc:
@@ -207,4 +378,3 @@ if __name__ == "__main__":
     except Exception as exc:
         print(f"f4_integration: FAIL {exc}", file=sys.stderr)
         sys.exit(1)
-

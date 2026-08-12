@@ -77,7 +77,7 @@ class RendererManager final : public QObject {
   static bool booleanProperty(const QJsonObject &properties, const QString &name,
                               bool fallback);
   static int stableWindowMs();
-  static int startupWindowMs();
+  static int startupWindowMs(const RendererSpec &spec, bool sceneNativeUnsupported);
   static int scaledDelayMs(int seconds);
 
   QHash<QString, Entry *> byOutput_;

@@ -193,6 +193,12 @@ def main():
             while time.monotonic() < deadline:
                 header = read_header(shm_path)
                 require(header["magic"] == b"ANIS", "bridge magic changed")
+                # frameNo == 0 is the producer's write-in-progress marker. A
+                # consumer must retain its last verified frame and retry on a
+                # later poll rather than treating the single payload as stable.
+                if header["frameNo"] == 0:
+                    time.sleep(0.001)
+                    continue
                 require(header["frameNo"] >= (sequence[-1] if sequence else 0),
                         f"bridge frame sequence regressed: {sequence[-1:]} -> {header}")
                 sequence.append(header["frameNo"])

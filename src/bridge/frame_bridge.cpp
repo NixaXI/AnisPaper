@@ -26,13 +26,22 @@ QString normalizedScaleMode(const QString &value) {
              : QStringLiteral("cover");
 }
 
-QImage rgbaForBridge(const QImage &input, const QSize &target,
-                     const QString &scaleMode) {
-  QImage source = input;
+QImage letterboxCanvas(const QSize &target) {
   QImage canvas(target, QImage::Format_RGBA8888);
   canvas.fill(QColor(QStringLiteral("#0A0D14")));
-  if (source.isNull()) return canvas;
-  source = source.convertToFormat(QImage::Format_RGBA8888);
+  return canvas;
+}
+
+QImage rgbaForBridge(const QImage &input, const QSize &target,
+                     const QString &scaleMode) {
+  if (input.isNull()) return letterboxCanvas(target);
+  // Hot path for the scene engine: the child already produced exactly the
+  // bridge geometry in RGBA8888, so return it untouched.  Allocating and
+  // filling the output-sized canvas before this check burned ~8 MB of
+  // memset per frame (≈0.5 GB/s at 60 FPS) for a canvas that was discarded.
+  const QImage source = input.format() == QImage::Format_RGBA8888
+                            ? input
+                            : input.convertToFormat(QImage::Format_RGBA8888);
   if (source.size() == target) return source;
 
   const QString mode = normalizedScaleMode(scaleMode);
@@ -51,12 +60,18 @@ QImage rgbaForBridge(const QImage &input, const QSize &target,
   const QSize scaledSize = source.size().scaled(target, aspectMode);
   const QImage scaled = source.scaled(scaledSize, Qt::KeepAspectRatio,
                                       Qt::SmoothTransformation);
+  QImage canvas = letterboxCanvas(target);
   QPainter painter(&canvas);
   painter.drawImage((target.width() - scaled.width()) / 2,
                     (target.height() - scaled.height()) / 2, scaled);
   painter.end();
   return canvas;
 }
+
+#ifdef ANISPAPER_BRIDGE_TESTING
+std::function<void()> g_sceneCopyHook;
+#endif
+
 }  // namespace
 
 QString sanitizeBridgeOutput(const QString &output) {
@@ -161,15 +176,110 @@ bool FrameBridge::publish(const QImage &image, QString *error) {
   const uchar *source = rgba.constBits();
   uchar *destination = reinterpret_cast<uchar *>(mapping_) + sizeof(FrameHeader);
   const qsizetype rowBytes = static_cast<qsizetype>(stride_);
+  // Mark the single payload buffer unavailable before overwriting it. Existing
+  // and current readers already reject frameNo == 0 and retain their cached
+  // image, so this is ABI-compatible with the provider currently loaded in
+  // plasmashell. Publish the next sequence only after the full memcpy.
+  const quint64 next = ++nextFrameNo_;
+  storeFrameNo(header_, 0);
   for (int row = 0; row < size_.height(); ++row) {
     std::memcpy(destination + row * rowBytes,
                 source + row * rgba.bytesPerLine(),
                 static_cast<size_t>(rowBytes));
   }
   header_->timestampNs = monotonicNs();
-  storeFrameNo(header_, ++nextFrameNo_);
+  storeFrameNo(header_, next);
   return true;
 }
+
+SceneTransportPublishResult FrameBridge::publishSceneTransport(
+    const SceneTransportView &source, quint64 *lastSceneFrame) {
+  if (!header_ || !mapping_ || !lastSceneFrame || !source.header || !source.slotData ||
+      source.width != static_cast<quint32>(size_.width()) ||
+      source.height != static_cast<quint32>(size_.height()) || source.stride != stride_ ||
+      source.format != kSceneTransportFormatRgba8888 || source.buffers == 0 ||
+      source.slotBytes != static_cast<size_t>(stride_) * size_.height()) {
+    return SceneTransportPublishResult::Ineligible;
+  }
+  // Recheck the fixed mapping metadata before indexing it.  The parent cached
+  // these values after fstat/mmap validation; a changed header is not a safe
+  // direct source and must fall back to the owned-image route.
+  if (std::memcmp(source.header->magic, kSceneTransportMagic, 4) != 0 ||
+      source.header->version != kSceneTransportVersion ||
+      source.header->format != source.format || source.header->width != source.width ||
+      source.header->height != source.height || source.header->stride != source.stride ||
+      source.header->buffers != source.buffers) {
+    return SceneTransportPublishResult::Ineligible;
+  }
+
+  bool busy = false;
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    const quint64 first = loadSceneFrameNo(source.header);
+    if (first == 0 || first == *lastSceneFrame) {
+      return busy ? SceneTransportPublishResult::Raced
+                  : SceneTransportPublishResult::NoNewFrame;
+    }
+    const quint32 expectedIndex = static_cast<quint32>(first % source.buffers);
+    if (loadSceneWriteIndex(source.header) != expectedIndex) {
+      continue;
+    }
+
+    // Preserve the public ABI protocol: no reader may treat the one payload
+    // buffer as stable while it is being overwritten from the child mapping.
+    if (!busy) {
+      storeFrameNo(header_, 0);
+      busy = true;
+    }
+    uchar *destination = reinterpret_cast<uchar *>(mapping_) + sizeof(FrameHeader);
+    const uchar *slot = source.slotData + static_cast<size_t>(expectedIndex) * source.slotBytes;
+#ifdef ANISPAPER_BRIDGE_TESTING
+    if (g_sceneCopyHook) {
+      for (int row = 0; row < size_.height(); ++row) {
+        std::memcpy(destination + static_cast<size_t>(row) * stride_,
+                    slot + static_cast<size_t>(row) * stride_, stride_);
+        if (row == size_.height() / 2) g_sceneCopyHook();
+      }
+    } else {
+      std::memcpy(destination, slot, source.slotBytes);
+    }
+#else
+    std::memcpy(destination, slot, source.slotBytes);
+#endif
+
+    // The child publishes the source sequence after completing a slot.  If it
+    // moved during this copy, retain the busy marker and retry once with the
+    // latest complete slot instead of exposing possibly torn bytes.
+    if (loadSceneFrameNo(source.header) != first ||
+        loadSceneWriteIndex(source.header) != expectedIndex) {
+      continue;
+    }
+    *lastSceneFrame = first;
+    header_->timestampNs = monotonicNs();
+    storeFrameNo(header_, ++nextFrameNo_);
+    return SceneTransportPublishResult::Published;
+  }
+  return SceneTransportPublishResult::Raced;
+}
+
+QImage FrameBridge::snapshot() const {
+  if (!header_ || !mapping_) return {};
+  const uchar *pixels = reinterpret_cast<const uchar *>(mapping_) + sizeof(FrameHeader);
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    const quint64 before = loadFrameNo(header_);
+    if (before == 0) return {};
+    QImage view(pixels, size_.width(), size_.height(), static_cast<int>(stride_),
+                QImage::Format_RGBA8888);
+    const QImage copy = view.copy();
+    if (loadFrameNo(header_) == before) return copy;
+  }
+  return {};
+}
+
+#ifdef ANISPAPER_BRIDGE_TESTING
+void FrameBridge::setSceneCopyHookForTesting(std::function<void()> hook) {
+  g_sceneCopyHook = std::move(hook);
+}
+#endif
 
 void FrameBridge::close() {
   if (mapping_) {
@@ -197,7 +307,12 @@ bool FrameBridge::isOpen() const { return header_ != nullptr && fd_ >= 0; }
 
 QString FrameBridge::name() const { return name_; }
 
-quint64 FrameBridge::frameNo() const { return loadFrameNo(header_); }
+quint64 FrameBridge::frameNo() const {
+  const quint64 published = loadFrameNo(header_);
+  // During the short in-progress window the SHM wire value is deliberately
+  // zero. Status reports the last completed sequence instead of regressing.
+  return published != 0 ? published : nextFrameNo_ > 0 ? nextFrameNo_ - 1 : 0;
+}
 
 QSize FrameBridge::frameSize() const { return size_; }
 
@@ -253,6 +368,18 @@ bool FrameBridgeManager::publish(const QString &output, const QImage &frame,
     return false;
   }
   return bridge->publish(frame, error);
+}
+
+SceneTransportPublishResult FrameBridgeManager::publishSceneTransport(
+    const QString &output, const SceneTransportView &source, quint64 *lastSceneFrame) {
+  FrameBridge *bridge = bridges_.value(output, nullptr);
+  return bridge ? bridge->publishSceneTransport(source, lastSceneFrame)
+                : SceneTransportPublishResult::Ineligible;
+}
+
+QImage FrameBridgeManager::snapshot(const QString &output) const {
+  const auto it = bridges_.constFind(output);
+  return it == bridges_.cend() || !it.value() ? QImage() : it.value()->snapshot();
 }
 
 FrameBridgeManager::~FrameBridgeManager() {

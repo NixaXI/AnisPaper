@@ -108,6 +108,15 @@ try:
  assert failed["error"]["code"]==-32603
  assert failed_custom not in r.call({"jsonrpc":"2.0","id":42,"method":"settings.get"})["result"]["customFolders"]
  time.sleep(.15);assert r.call({"jsonrpc":"2.0","id":43,"method":"status.get"})["result"]["catalog"]["generation"]==before_fail
+ # A Steam Workshop content tree can also be configured as a custom folder
+ # (or reach one through steam-imports).  It must not duplicate each manifest
+ # as custom:<hash>; the stable Steam identity wins by canonical project root.
+ steam_content=lib1+"/steamapps/workshop/content/431960"
+ assert r.call({"jsonrpc":"2.0","id":44,"method":"catalog.addFolder","params":{"path":steam_content}})["result"]["added"]
+ wait_stable(r)
+ items=r.call({"jsonrpc":"2.0","id":45,"method":"catalog.list"})["result"]
+ roots=[x for x in items if x.get("root")==os.path.realpath(lib1+"/steamapps/workshop/content/431960/10")]
+ assert len(roots)==1 and roots[0]["id"]=="steam:10" and roots[0]["source"]=="steam", "custom/steam root collision was not deduplicated: "+repr(roots)
  # The VDF parent is filtered: unrelated neighbours must not schedule a scan.
  before_neighbour,_=wait_stable(r)
  neighbour=root+"/not-libraryfolders.vdf";touch(neighbour);os.unlink(neighbour)

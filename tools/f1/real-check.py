@@ -8,7 +8,9 @@ import socket
 import sys
 import time
 
-MAX_LINE = 1024 * 1024
+# Keep this in sync with the daemon's kMaxResponse.  A real catalog can
+# legitimately exceed 1 MiB once item properties are included.
+MAX_LINE = 4 * 1024 * 1024
 REQUIRED_ITEM_FIELDS = {"id", "title", "type", "file", "preview", "tags", "properties", "source", "root"}
 
 
@@ -33,7 +35,7 @@ class Rpc:
                     raise RuntimeError("daemon closed the socket")
                 self.buffer += chunk
                 if len(self.buffer) > MAX_LINE:
-                    raise RuntimeError("daemon response exceeded 1 MiB")
+                    raise RuntimeError("daemon response exceeded 4 MiB")
             raw, self.buffer = self.buffer.split(b"\n", 1)
             return json.loads(raw.decode("utf-8"))
         finally:
@@ -68,7 +70,7 @@ class Rpc:
                 return params
 
 
-def require_f2_boundary(rpc, method):
+def require_invalid_params(rpc, method):
     ident = rpc.next_id
     rpc.next_id += 1
     rpc.sock.sendall(json.dumps({"jsonrpc": "2.0", "id": ident, "method": method, "params": {}}, separators=(",", ":")).encode() + b"\n")
@@ -77,9 +79,9 @@ def require_f2_boundary(rpc, method):
         if response.get("id") != ident:
             continue
         error = response.get("error", {})
-        if error.get("code") != -32001 or error.get("message") != "disponible en F2/F3":
-            raise RuntimeError(f"{method}: expected F2 boundary, got {error}")
-        print(f"{method}.boundary=-32001 disponible en F2/F3")
+        if error.get("code") != -32602:
+            raise RuntimeError(f"{method}: expected invalid-params boundary, got {error}")
+        print(f"{method}.invalid_params=-32602")
         return
 
 
@@ -240,8 +242,11 @@ def main():
         check_stability(rpc, args.stability_seconds)
         inspect_catalog(rpc, expected_count=args.expected_count, real_mode=args.watch_root is not None)
         inspect_monitors(rpc, real_mode=args.watch_root is not None)
-        require_f2_boundary(rpc, "wallpaper.apply")
-        require_f2_boundary(rpc, "preview.frame")
+        # F1's smoke check must remain non-mutating after F2/F3 implement the
+        # renderer RPCs.  Missing required parameters are rejected before any
+        # renderer can be created.
+        require_invalid_params(rpc, "wallpaper.apply")
+        require_invalid_params(rpc, "preview.frame")
         if rpc.call("events.subscribe") != {"subscribed": True}:
             raise RuntimeError("events.subscribe returned an unexpected result")
         print("events.subscribed=true")

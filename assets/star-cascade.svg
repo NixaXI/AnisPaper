@@ -1,0 +1,24 @@
+<svg width="1200" height="120" viewBox="0 0 1200 120" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="star cascade divider">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#ffd54a"/>
+      <stop offset="50%" stop-color="#fff1a8"/>
+      <stop offset="100%" stop-color="#ffd54a"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="120" fill="transparent"/>
+  <g fill="url(#g)">
+    <path d="M136 22l8 17 19 2-14 12 4 19-17-10-17 10 4-19-14-12 19-2 8-17z"/>
+    <path d="M174 53l5 11 12 1-9 8 3 12-11-6-11 6 3-12-9-8 12-1 5-11z"/>
+    <path d="M205 79l4 9 10 1-7 6 2 10-9-5-9 5 2-10-7-6 10-1 4-9z"/>
+
+    <path d="M562 35l6 13 14 1-10 9 3 14-13-7-13 7 3-14-10-9 14-1 6-13z"/>
+    <path d="M597 62l4 9 10 1-7 6 2 10-9-5-9 5 2-10-7-6 10-1 4-9z"/>
+
+    <path d="M968 22l8 17 19 2-14 12 4 19-17-10-17 10 4-19-14-12 19-2 8-17z"/>
+    <path d="M1006 53l5 11 12 1-9 8 3 12-11-6-11 6 3-12-9-8 12-1 5-11z"/>
+    <path d="M1037 79l4 9 10 1-7 6 2 10-9-5-9 5 2-10-7-6 10-1 4-9z"/>
+  </g>
+  <rect x="270" y="56" width="220" height="2" rx="1" fill="url(#g)" opacity="0.9"/>
+  <rect x="640" y="56" width="220" height="2" rx="1" fill="url(#g)" opacity="0.9"/>
+</svg>
