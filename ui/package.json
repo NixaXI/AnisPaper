@@ -5,10 +5,11 @@
   "description": "ANIS STAR control room for anis-paperd",
   "main": "dist-electron/electron/main.js",
   "scripts": {
-    "dev": "node ./node_modules/concurrently/dist/bin/concurrently.js -k -n renderer,electron -c cyan,magenta \"node ./scripts/vite-with-esbuild.mjs --host 127.0.0.1\" \"node ./node_modules/wait-on/bin/wait-on tcp:127.0.0.1:5173 && node ./node_modules/cross-env/src/bin/cross-env.js VITE_DEV_SERVER_URL=http://127.0.0.1:5173 node ./scripts/electron-runtime.mjs .\"",
+    "dev": "npm run build:electron && node ./node_modules/concurrently/dist/bin/concurrently.js -k -n renderer,electron -c cyan,magenta \"node ./scripts/vite-with-esbuild.mjs --host 127.0.0.1\" \"node ./node_modules/wait-on/bin/wait-on tcp:127.0.0.1:5173 && node ./node_modules/cross-env/src/bin/cross-env.js VITE_DEV_SERVER_URL=http://127.0.0.1:5173 node ./scripts/electron-runtime.mjs .\"",
     "build": "node ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/typescript/bin/tsc -p tsconfig.electron.json && node ./scripts/vite-with-esbuild.mjs build",
     "typecheck": "node ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/typescript/bin/tsc -p tsconfig.electron.json",
-    "start": "node ./scripts/electron-runtime.mjs ."
+    "start": "node ./scripts/electron-runtime.mjs .",
+    "build:electron": "node ./node_modules/typescript/bin/tsc -p tsconfig.electron.json"
   },
   "dependencies": {
     "react": "^18.3.1",
