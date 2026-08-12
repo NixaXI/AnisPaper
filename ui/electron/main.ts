@@ -7,6 +7,12 @@ import type { DaemonEvent, JsonRecord } from "../shared/types";
 const MAX_LINE_BYTES = 4 * 1024 * 1024;
 const MAX_PREVIEW_BYTES = 8 * 1024 * 1024;
 const RPC_TIMEOUT_MS = 8_000;
+// The renderer view asks for a live frame at roughly 15 Hz.  A scene child is
+// allowed to take a little while to initialize (and the watchdog can be
+// replacing one), so do not turn that transient state into a stream of
+// identical JSON-RPC errors or repeated full-resolution JPEG encodes.
+const PREVIEW_CACHE_MS = 120;
+const PREVIEW_UNAVAILABLE_RETRY_MS = 750;
 
 const rpcMethods = new Set([
   "catalog.list",
@@ -35,6 +41,11 @@ interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timer: NodeJS.Timeout;
+}
+
+interface PreviewCacheEntry {
+  result: unknown;
+  expiresAt: number;
 }
 
 class RpcError extends Error {
@@ -67,6 +78,13 @@ class DaemonClient {
   private retryTimer: NodeJS.Timeout | null = null;
   private stopped = false;
   private readonly previewPaths = new Set<string>();
+  private readonly previewCache = new Map<string, PreviewCacheEntry>();
+  private readonly previewInFlight = new Map<string, Promise<unknown>>();
+  private readonly previewRetryAfter = new Map<string, number>();
+  private readonly previewDelay = new Map<
+    string,
+    { timer: NodeJS.Timeout; reject: (reason: Error) => void }
+  >();
 
   start(): void {
     this.stopped = false;
@@ -80,6 +98,9 @@ class DaemonClient {
     const socket = this.socket;
     this.socket = null;
     this.connected = false;
+    this.previewCache.clear();
+    this.cancelPreviewDelays("La aplicación se está cerrando.");
+    this.previewRetryAfter.clear();
     socket?.destroy();
     this.rejectPending("La aplicación se está cerrando.");
   }
@@ -89,6 +110,55 @@ class DaemonClient {
   }
 
   call<T>(method: string, params: JsonRecord = {}): Promise<T> {
+    if (method === "preview.frame" && typeof params.output === "string" && params.output.length > 0) {
+      return this.callPreview<T>(params.output, params);
+    }
+    return this.callRaw<T>(method, params);
+  }
+
+  private callPreview<T>(output: string, params: JsonRecord): Promise<T> {
+    const now = Date.now();
+    const cached = this.previewCache.get(output);
+    if (cached && cached.expiresAt > now) return Promise.resolve(cached.result as T);
+
+    const inFlight = this.previewInFlight.get(output);
+    if (inFlight) return inFlight as Promise<T>;
+
+    const retryAfter = this.previewRetryAfter.get(output) ?? 0;
+    const delay = Math.max(0, retryAfter - now);
+    // Do not reject locally on every 67 ms renderer poll while a child is in
+    // STARTING/RECOVERING. Electron logs every rejected ipcMain handler, which
+    // turned one backend -32001 into an error flood. Keep exactly one delayed
+    // probe in flight per output; callers share it until the backoff expires.
+    const request = new Promise<T>((resolve, reject) => {
+      const probe = () => {
+        this.previewDelay.delete(output);
+        this.callRaw<T>("preview.frame", params).then(resolve, reject);
+      };
+      if (delay > 0) {
+        const timer = setTimeout(probe, delay);
+        this.previewDelay.set(output, { timer, reject });
+      } else {
+        probe();
+      }
+    })
+      .then((result) => {
+        this.previewCache.set(output, { result, expiresAt: Date.now() + PREVIEW_CACHE_MS });
+        this.previewRetryAfter.delete(output);
+        return result;
+      })
+      .catch((error: unknown) => {
+        if (error instanceof RpcError && error.code === -32001) {
+          this.previewRetryAfter.set(output, Date.now() + PREVIEW_UNAVAILABLE_RETRY_MS);
+        }
+        throw error;
+      })
+      .finally(() => this.previewInFlight.delete(output));
+    this.previewInFlight.set(output, request);
+    return request;
+  }
+
+  private callRaw<T>(method: string, params: JsonRecord = {}): Promise<T> {
     const socket = this.socket;
     if (!this.connected || !socket || socket.destroyed) {
       return Promise.reject(
@@ -214,6 +284,7 @@ class DaemonClient {
     const wasConnected = this.connected;
     this.connected = false;
     this.connecting = false;
+    this.cancelPreviewDelays(message);
     this.rejectPending(message);
     if (wasConnected || !this.stopped) {
       this.broadcast({ online: false, message });
@@ -224,6 +295,14 @@ class DaemonClient {
         this.connect();
       }, 1_500);
     }
+  }
+
+  private cancelPreviewDelays(message: string): void {
+    for (const delayed of this.previewDelay.values()) {
+      clearTimeout(delayed.timer);
+      delayed.reject(new RpcError(message));
+    }
+    this.previewDelay.clear();
   }
 
   private rejectPending(message: string): void {

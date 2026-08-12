@@ -50,9 +50,14 @@ process.once("SIGTERM", () => forwardTermination("SIGTERM"));
 function runElectron() {
   return new Promise((resolve, reject) => {
     console.log(`[AnisPaper] Electron flags: ${electronArguments.filter((argument) => argument.startsWith("--")).join(" ")}`);
+    // Codex/the shell can run the launcher with this Node-mode switch set.
+    // It makes the Electron binary parse Chromium flags as Node flags and
+    // exit before main.ts gets a chance to start.
+    const childEnvironment = { ...process.env, ELECTRON_OVERRIDE_DIST_PATH: runtimeDist };
+    delete childEnvironment.ELECTRON_RUN_AS_NODE;
     const child = spawn(process.execPath, [cli, ...electronArguments], {
       cwd: uiRoot,
-      env: { ...process.env, ELECTRON_OVERRIDE_DIST_PATH: runtimeDist },
+      env: childEnvironment,
       stdio: "inherit"
     });
     electronChild = child;
