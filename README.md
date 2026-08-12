@@ -23,9 +23,21 @@
 
 <br>
 
-> **Experimental, open-source-oriented project. Testers, forks, bug reports and pull requests are welcome.**
+> **Experimental project. Testers, forks, bug reports and pull requests are welcome.**
 
 <img src="assets/star-cascade.svg" alt="" width="72%" />
+
+</div>
+
+---
+
+## ✦ Demo
+
+<div align="center">
+
+<img src="assets/anispaper-demo.gif"
+     alt="AnisPaper running a live wallpaper on KDE Plasma 6"
+     width="900" />
 
 </div>
 
@@ -37,16 +49,16 @@
 
 > **Make the desktop move without making Plasma do all the heavy rendering work.**
 
-Instead of embedding the expensive renderer inside `plasmashell`, AnisPaper splits the work into separate components:
+Instead of embedding the expensive renderer directly inside `plasmashell`, AnisPaper splits the work into separate components:
 
 - ★ an Electron control UI
-- ★ a native daemon (`anis-paperd`)
+- ★ a native daemon: `anis-paperd`
 - ★ isolated renderers
 - ★ a dedicated Wallpaper Engine Scene process
 - ★ shared-memory frame transport
 - ★ a minimal Plasma wallpaper plugin called **AnisPaper Frame**
 
-The result is a pipeline where the wallpaper renderer can fail independently without taking the whole desktop shell with it.
+The goal is to keep rendering failures away from the desktop shell while still making animated wallpapers feel like a native part of Plasma.
 
 ---
 
@@ -81,7 +93,7 @@ This is still an experimental project, not a polished consumer release.
 | Feature | Status |
 |---|---|
 | KDE Plasma 6 | ✅ |
-| Wayland desktop target | ✅ |
+| Wayland target | ✅ |
 | Per-monitor wallpaper selection | ✅ |
 | Steam library discovery | ✅ |
 | Multiple Steam libraries | ✅ |
@@ -94,7 +106,7 @@ This is still an experimental project, not a polished consumer release.
 | Web wallpapers | 🧪 |
 | Renderer watchdog / safe-mode plumbing | ✅ |
 | SDDM / login wallpaper integration | 🧪 Experimental |
-| Packaged one-click installer | 🚧 Not yet |
+| One-click installer | 🚧 Not yet |
 
 ---
 
@@ -155,42 +167,29 @@ Recommended/currently targeted:
 - Steam
 - a legitimate installation of **Wallpaper Engine** for Wallpaper Engine Scene content
 
-The project does **not** include Steam Workshop wallpapers or Wallpaper Engine proprietary assets.
+AnisPaper does **not** include Steam Workshop wallpapers or Wallpaper Engine proprietary assets.
 
 ### Build dependencies
 
-The native project currently needs:
+The native project currently uses:
 
-- CMake 3.20+
+- CMake
 - a C/C++20 toolchain
 - `pkg-config`
-- Wayland client libraries + `wayland-scanner`
-- Qt 6:
-  - Core
-  - Network
-  - Gui
-  - OpenGL
-  - Widgets
-  - WebEngine
-  - Quick
-  - QML
-  - DBus
-- KDE Frameworks 6 Auth
-- mpv
-- libjpeg
+- Wayland client libraries
+- Qt 6
+- KDE Frameworks 6 components
 - OpenGL / EGL
 - GLEW
-- GLUT
-- zlib
+- mpv
+- FFmpeg
 - SDL2
 - LZ4
-- FFmpeg
+- libjpeg
 - PulseAudio libraries
 - Freetype
 - DBus
 - X11 development libraries
-
-The Scene engine vendors its Wallpaper Engine rendering foundation inside `third_party/`.
 
 ### UI dependencies
 
@@ -222,7 +221,7 @@ sudo pacman -S --needed \
 
 Package names may differ on other distributions.
 
-If CMake reports a missing package, treat the CMake error as the source of truth for your system.
+If CMake reports a missing package, use the CMake error as the source of truth for your system.
 
 ---
 
@@ -233,7 +232,7 @@ git clone https://github.com/NixaXI/AnisPaper.git
 cd AnisPaper
 ```
 
-The currently required third-party renderer sources are already stored under:
+The currently required third-party renderer sources are stored under:
 
 ```text
 third_party/
@@ -250,8 +249,6 @@ cmake -S . -B build \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$HOME/.local"
 ```
-
-This configures the native daemon, renderer, Plasma plugin and helper targets.
 
 ---
 
@@ -280,7 +277,9 @@ The first Scene build can take a while because the vendored rendering stack also
 cmake --install build
 ```
 
-With `-DCMAKE_INSTALL_PREFIX="$HOME/.local"`, the install step places the major pieces under your user account, including:
+With `-DCMAKE_INSTALL_PREFIX="$HOME/.local"`, the major pieces are installed under your user account.
+
+Typical locations include:
 
 ```text
 ~/.local/bin/anis-paperd
@@ -292,9 +291,7 @@ With `-DCMAKE_INSTALL_PREFIX="$HOME/.local"`, the install step places the major 
 ~/.local/share/systemd/user/anispaper.service
 ```
 
-It also installs the AnisPaper fallback asset and the experimental SDDM helper.
-
-No `sudo` should be required for this local-prefix installation.
+No `sudo` should be required for this local-prefix install.
 
 ---
 
@@ -312,7 +309,7 @@ Enable and start AnisPaper:
 systemctl --user enable --now anispaper.service
 ```
 
-Check it:
+Check its status:
 
 ```bash
 systemctl --user status anispaper.service
@@ -324,37 +321,32 @@ Live logs:
 journalctl --user -u anispaper.service -f
 ```
 
-The daemon is responsible for catalog discovery, renderer lifecycle, settings and the local RPC socket.
-
 ---
 
-## ★ 8. Build the Electron UI
+## ★ 8. Build and run the Electron UI
 
-In a second terminal:
+Open a second terminal:
 
 ```bash
 cd AnisPaper/ui
 npm ci
-npm run build
-```
-
-Then start it:
-
-```bash
-npm run start
-```
-
-For development mode instead:
-
-```bash
 npm run dev
 ```
 
-### Wayland note
+For a production-style local build:
 
-The current Electron launcher detects Wayland sessions and may launch Electron through an XWayland-compatible configuration for stability.
+```bash
+npm run build
+npm run start
+```
 
-That affects the **control window**, not the Plasma wallpaper target itself.
+### Note for NTFS / FUSE / filesystems without executable bits
+
+Some mounted filesystems do not preserve executable permissions correctly.
+
+If `npm ci` fails with an `EACCES` error while trying to run `esbuild`, move the project to a native Linux filesystem or use a workaround that installs dependencies without running native post-install scripts and executes required binaries from a temporary executable location.
+
+This area is still being improved.
 
 ---
 
@@ -371,7 +363,7 @@ Right click desktop
 
 If **AnisPaper Frame** is already active, you do not need to change it again.
 
-The plugin itself is intentionally minimal. Wallpaper selection happens in the **AnisPaper application**.
+Wallpaper selection happens in the **AnisPaper application**. The Plasma plugin itself is intentionally minimal.
 
 ---
 
@@ -382,10 +374,10 @@ Start the UI and:
 1. wait for the catalog to finish scanning
 2. select a wallpaper
 3. select the target monitor/output
-4. choose the scale mode if needed
+4. choose a scale mode if needed
 5. apply it
 
-For example, outputs may look like:
+Typical output names may look like:
 
 ```text
 DP-1
@@ -393,22 +385,20 @@ DP-2
 HDMI-A-1
 ```
 
-AnisPaper maps the selected wallpaper to the requested output and starts the appropriate renderer.
-
 ---
 
 # ✦ Steam / Wallpaper Engine setup
 
 ## ★ Default Steam discovery
 
-AnisPaper looks for Steam's `libraryfolders.vdf` in the common Linux locations:
+AnisPaper looks for Steam's `libraryfolders.vdf` in common Linux locations such as:
 
 ```text
 ~/.steam/steam/steamapps/libraryfolders.vdf
 ~/.local/share/Steam/steamapps/libraryfolders.vdf
 ```
 
-It reads Steam's library configuration and can discover Workshop content in multiple Steam libraries.
+It reads Steam's library configuration and can discover Workshop content across multiple Steam libraries.
 
 Wallpaper Engine Workshop content uses Steam app ID:
 
@@ -426,7 +416,7 @@ If your `libraryfolders.vdf` is somewhere unusual, set:
 ANISPAPER_STEAM_VDF
 ```
 
-For a user systemd service, create an override:
+For a user systemd service:
 
 ```bash
 systemctl --user edit anispaper.service
@@ -454,28 +444,14 @@ journalctl --user -u anispaper.service -n 100 --no-pager
 
 ---
 
-## ★ Custom wallpaper folders
-
-The daemon also supports custom catalog folders.
-
-This is useful for locally stored compatible wallpaper projects that are not discovered through Steam.
-
----
-
 # ✦ Troubleshooting
 
 ## ★ AnisPaper Frame does not appear in Plasma
 
-First verify the plugin installation:
+Verify the plugin installation:
 
 ```bash
 ls ~/.local/share/plasma/wallpapers/org.anispaper.frame
-```
-
-Then check that the QML provider library exists somewhere under:
-
-```bash
-~/.local/share/plasma/wallpapers/org.anispaper.frame/contents/ui/org/anispaper/frame/
 ```
 
 If you just installed it while Plasma was already running, re-open the wallpaper configuration page.
@@ -510,8 +486,6 @@ For a `$HOME/.local` install it should normally resolve to:
 ~/.local/bin/anis-paperd
 ```
 
-Make sure `~/.local/bin` is in your `PATH`.
-
 ---
 
 ## ✦ Steam wallpapers are missing
@@ -528,7 +502,7 @@ or:
 ls ~/.steam/steam/steamapps/libraryfolders.vdf
 ```
 
-If Steam lives elsewhere, configure `ANISPAPER_STEAM_VDF` as explained above.
+If Steam lives elsewhere, configure `ANISPAPER_STEAM_VDF`.
 
 ---
 
@@ -537,7 +511,7 @@ If Steam lives elsewhere, configure `ANISPAPER_STEAM_VDF` as explained above.
 Possible causes include:
 
 - unsupported wallpaper content
-- missing Wallpaper Engine assets
+- missing assets
 - damaged/incomplete Workshop download
 - missing `anis-paper-scene-engine`
 - Scene initialization failure
@@ -548,7 +522,7 @@ Check:
 journalctl --user -u anispaper.service -n 200 --no-pager
 ```
 
-Also verify:
+And verify:
 
 ```bash
 ls -lh ~/.local/bin/anis-paper-scene-engine
@@ -568,44 +542,19 @@ AnisPaper does not attempt to reconstruct missing proprietary Workshop data.
 
 ---
 
-## ★ UI starts with `renderer unavailable` messages
+## ★ UI shows repeated `renderer unavailable` messages
 
 The current development UI can still produce noisy RPC errors for renderer-unavailable states.
 
 This is a known cleanup area.
 
-If the active wallpaper still renders correctly, include the exact RPC method/error when opening an Issue so the expected and unexpected failures can be separated.
-
----
-
-## ✦ UI build problems
-
-Clean install:
-
-```bash
-cd ui
-rm -rf node_modules
-npm ci
-npm run build
-```
-
-Development:
-
-```bash
-npm run dev
-```
-
-Production-style local start after building:
-
-```bash
-npm run start
-```
+If the active wallpaper still renders correctly, include the exact error and reproduction steps when opening an Issue.
 
 ---
 
 # ★ Development
 
-## Native build
+## Native debug build
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
@@ -613,10 +562,6 @@ cmake --build build -j"$(nproc)"
 ```
 
 ## Tests
-
-CMake enables CTest support.
-
-After building:
 
 ```bash
 ctest --test-dir build --output-on-failure
@@ -759,7 +704,7 @@ Stop and disable the daemon:
 systemctl --user disable --now anispaper.service
 ```
 
-Remove the installed native components from the local prefix:
+Remove the installed local components:
 
 ```bash
 rm -f ~/.local/bin/anis-paperd
@@ -778,8 +723,6 @@ Reload user systemd:
 systemctl --user daemon-reload
 ```
 
-The cloned source directory and `ui/node_modules` can then be removed separately if desired.
-
 ---
 
 # ✦ Project status
@@ -795,7 +738,7 @@ Current priorities include:
 - [ ] more GPU coverage
 - [ ] automated CI
 - [ ] first tagged alpha release
-- [ ] better screenshots / GIF showcase
+- [ ] more screenshots / showcase material
 
 ---
 
