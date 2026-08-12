@@ -50,6 +50,7 @@ constexpr int kMaxConnections = 32;
 
 QString configHome() { auto v=qEnvironmentVariable("XDG_CONFIG_HOME"); return v.isEmpty()?QDir::homePath()+"/.config":v; }
 QString settingsPath() { return configHome()+"/anispaper/settings.json"; }
+QString wallpaperStatePath() { return configHome()+"/anispaper/wallpapers.json"; }
 QString runtimeDir() { return qEnvironmentVariable("XDG_RUNTIME_DIR"); }
 QString socketPath() { return runtimeDir()+"/anispaper.sock"; }
 bool isWithin(const QString &root, const QString &path) { return path==root || path.startsWith(root+QDir::separator()); }
@@ -121,6 +122,70 @@ class SettingsStore {
   }
  private: Settings bad(const QString&m) { qWarning().noquote()<<m<<"; using defaults without overwriting file"; Settings s; s.corrupt=true; return s; }
 };
+
+
+QHash<QString, QString> loadWallpaperState() {
+  QHash<QString, QString> state;
+  QFile file(wallpaperStatePath());
+  if (!file.exists()) return state;
+
+  if (!file.open(QIODevice::ReadOnly) || file.size() > 1024 * 1024) {
+    qWarning().noquote() << "wallpaper restore state unreadable; ignoring it";
+    return {};
+  }
+
+  QJsonParseError parseError;
+  const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+  if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+    qWarning().noquote() << "wallpaper restore state corrupt; ignoring it";
+    return {};
+  }
+
+  const QJsonObject root = document.object();
+  if (root.value("version").toInt(-1) != 1 || !root.value("outputs").isObject()) {
+    qWarning().noquote() << "wallpaper restore state has unsupported format; ignoring it";
+    return {};
+  }
+
+  const QJsonObject outputs = root.value("outputs").toObject();
+  for (auto it = outputs.begin(); it != outputs.end(); ++it) {
+    if (!it.value().isString()) continue;
+    const QString output = it.key();
+    const QString id = it.value().toString();
+    if (output.isEmpty() || output.size() > 256 ||
+        output.trimmed() != output ||
+        id.isEmpty() || id.size() > 512) {
+      continue;
+    }
+    state.insert(output, id);
+  }
+  return state;
+}
+
+bool saveWallpaperState(const QHash<QString, QString> &state, QString *error) {
+  QJsonObject outputs;
+  for (auto it = state.cbegin(); it != state.cend(); ++it) {
+    outputs.insert(it.key(), it.value());
+  }
+
+  QJsonObject root;
+  root.insert("version", 1);
+  root.insert("outputs", outputs);
+
+  QDir().mkpath(QFileInfo(wallpaperStatePath()).absolutePath());
+  QSaveFile file(wallpaperStatePath());
+  if (!file.open(QIODevice::WriteOnly)) {
+    if (error) *error = file.errorString();
+    return false;
+  }
+
+  if (file.write(QJsonDocument(root).toJson(QJsonDocument::Compact)) < 0 ||
+      !file.commit()) {
+    if (error) *error = file.errorString();
+    return false;
+  }
+  return true;
+}
 
 struct ScanResult { QJsonArray items; QStringList watchDirs; QStringList vdfParsePaths; QStringList vdfWatchPaths; QHash<QString,QSet<QString>> watchFilters; };
 QString safeChild(const QString &root, const QString &relative) {
@@ -352,14 +417,40 @@ class Daemon : public QObject {
   Daemon() : watcher_([this] { refreshAsync(); }, this) {
     renderers_ = &RendererManager::instance(this);
     connect(renderers_, &RendererManager::wallpaperActive, this,
-            [this](const QJsonObject &event) { broadcast("wallpaper.active", event); });
+            [this](const QJsonObject &event) {
+              const QString output = event.value("output").toString();
+              const QString wallpaperId = event.value("id").toString();
+              if (!output.isEmpty() && !wallpaperId.isEmpty()) {
+                savedWallpapers_.insert(output, wallpaperId);
+                QString stateError;
+                if (!saveWallpaperState(savedWallpapers_, &stateError)) {
+                  qWarning().noquote()
+                      << "could not save wallpaper restore state:" << stateError;
+                }
+              }
+              broadcast("wallpaper.active", event);
+            });
     connect(renderers_, &RendererManager::wallpaperStopped, this,
-            [this](const QJsonObject &event) { broadcast("wallpaper.stopped", event); });
+            [this](const QJsonObject &event) {
+              const QString output = event.value("output").toString();
+              const QString reason = event.value("reason").toString();
+              if (reason == QStringLiteral("stopped") && !output.isEmpty()) {
+                if (savedWallpapers_.remove(output) > 0) {
+                  QString stateError;
+                  if (!saveWallpaperState(savedWallpapers_, &stateError)) {
+                    qWarning().noquote()
+                        << "could not save wallpaper restore state:" << stateError;
+                  }
+                }
+              }
+              broadcast("wallpaper.stopped", event);
+            });
     connect(renderers_, &RendererManager::wallpaperCrash, this,
             [this](const QJsonObject &event) { broadcast("wallpaper.crashed", event); });
     connect(renderers_, &RendererManager::wallpaperSafeMode, this,
             [this](const QJsonObject &event) { broadcast("wallpaper.safeMode", event); });
     settings_ = store_.load();
+    savedWallpapers_ = loadWallpaperState();
     refreshAsync();
   }
 
@@ -498,6 +589,125 @@ class Daemon : public QObject {
     }
     if (!added.isEmpty() || !removed.isEmpty()) {
       broadcast("catalog.changed", {{"added", added}, {"removed", removed}});
+    }
+    if (!restoreScheduled_ && !savedWallpapers_.isEmpty()) {
+      restoreScheduled_ = true;
+      QTimer::singleShot(1000, this, [this] { restoreSavedWallpapers(); });
+    }
+  }
+
+  void scheduleWallpaperRestoreRetry() {
+    if (restoreAttempt_ >= 20) {
+      qWarning().noquote()
+          << "wallpaper boot restore stopped after" << restoreAttempt_
+          << "attempts; saved assignments are kept";
+      return;
+    }
+
+    ++restoreAttempt_;
+    const int delayMs = qMin(5000, 750 + restoreAttempt_ * 250);
+    QTimer::singleShot(delayMs, this, [this] { restoreSavedWallpapers(); });
+  }
+
+  void restoreSavedWallpapers() {
+    if (savedWallpapers_.isEmpty()) return;
+
+    const QJsonArray outputs = listWaylandOutputs();
+    if (outputs.isEmpty()) {
+      scheduleWallpaperRestoreRetry();
+      return;
+    }
+
+    int pending = 0;
+    for (auto it = savedWallpapers_.cbegin(); it != savedWallpapers_.cend(); ++it) {
+      const QString savedOutput = it.key();
+      const QString wallpaperId = it.value();
+
+      const QString output =
+          PlasmaWallpaperActivator::connectedOutputIdentity(savedOutput, outputs);
+      if (output.isEmpty()) {
+        ++pending;
+        continue;
+      }
+
+      // Si el usuario ya aplicó algo durante el login, no lo pisamos.
+      if (!renderers_->wallpaperId(output).isEmpty()) continue;
+
+      const QJsonObject item = catalogItem(wallpaperId);
+      if (item.isEmpty()) {
+        ++pending;
+        qWarning().noquote()
+            << "boot restore: wallpaper not in catalog yet:"
+            << wallpaperId << "for" << output;
+        continue;
+      }
+
+      RendererOptions options{qBound(1, settings_.fpsCap, 60),
+                              settings_.defaultVolume,
+                              settings_.wallpaperScaleMode};
+
+      // IMPORTANT: boot restore must follow the same Plasma activation path as
+      // wallpaper.apply. Starting only the renderer leaves Plasma's wallpaper
+      // containment/output mapping stale, which can shift/crop the Scene.
+      PlasmaActivationPlan plasmaPlan;
+      PlasmaDbusTransport plasmaTransport;
+      PlasmaWallpaperActivator plasmaActivator(&plasmaTransport);
+
+      QString plasmaError;
+      if (!plasmaActivator.preflight(output, options.scaleMode,
+                                     &plasmaPlan, &plasmaError)) {
+        ++pending;
+        qWarning().noquote()
+            << "boot restore Plasma preflight failed for" << output
+            << wallpaperId << ":" << plasmaError;
+        continue;
+      }
+
+      if (!PlasmaWallpaperActivator::mappingsMatchWaylandOutputs(
+              plasmaPlan.mappingsBefore, outputs, &plasmaError)) {
+        ++pending;
+        qWarning().noquote()
+            << "boot restore Plasma output mapping not ready for" << output
+            << wallpaperId << ":" << plasmaError;
+        continue;
+      }
+
+      QString restoreError;
+      int restoreCode = -32001;
+      if (!renderers_->apply(item, output, options, &restoreError, &restoreCode)) {
+        ++pending;
+        qWarning().noquote()
+            << "boot restore renderer failed for" << output << wallpaperId
+            << "(" << restoreCode << "):" << restoreError;
+        continue;
+      }
+
+      if (!plasmaActivator.commit(plasmaPlan, &plasmaError)) {
+        // Keep the persisted assignment even though the transient renderer must
+        // be stopped. wallpaperStopped is synchronous in this process, so save
+        // the assignment again after stop().
+        renderers_->stop(output);
+        savedWallpapers_.insert(savedOutput, wallpaperId);
+        QString stateError;
+        if (!saveWallpaperState(savedWallpapers_, &stateError)) {
+          qWarning().noquote()
+              << "could not preserve boot restore state after Plasma failure:"
+              << stateError;
+        }
+
+        ++pending;
+        qWarning().noquote()
+            << "boot restore Plasma commit failed for" << output
+            << wallpaperId << ":" << plasmaError;
+        continue;
+      }
+
+      qInfo().noquote()
+          << "restored wallpaper" << wallpaperId << "on" << output;
+    }
+
+    if (pending > 0) {
+      scheduleWallpaperRestoreRetry();
     }
   }
 
@@ -1199,6 +1409,7 @@ class Daemon : public QObject {
 
   SettingsStore store_;
   Settings settings_;
+  QHash<QString, QString> savedWallpapers_;
   QJsonArray catalog_;
   QLocalServer server_;
   QList<Client *> clients_;
@@ -1208,6 +1419,8 @@ class Daemon : public QObject {
   QHash<QString, QProcess *> steamInstalls_;
   bool scanning_ = false;
   bool queuedRefresh_ = false;
+  bool restoreScheduled_ = false;
+  int restoreAttempt_ = 0;
   quint64 generation_ = 0;
   dev_t inodeDev_{};
   ino_t inode_{};
