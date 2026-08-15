@@ -83,6 +83,11 @@ WallpaperItem {
             mipmap: false
             cache: false
             asynchronous: false
+            // Keep the last uploaded texture while the next provider request
+            // is in flight.  The frame source changes at publication rate;
+            // clearing Image on every URL change exposes the #0A0D14 backing
+            // rectangle for a tick when Plasma's scene graph is busy.
+            retainWhileLoading: true
             horizontalAlignment: Image.AlignHCenter
             verticalAlignment: Image.AlignVCenter
             source: "image://anispaper/" +

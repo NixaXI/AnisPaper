@@ -2,8 +2,10 @@
 
 #include "renderer.h"
 
+#include <QByteArray>
 #include <QTimer>
 
+#include <atomic>
 #include <memory>
 
 class QOffscreenSurface;
@@ -33,6 +35,9 @@ class VideoRenderer final : public Renderer {
 
  private:
   static void *getProcAddress(void *context, const char *name);
+  static void onMpvUpdate(void *context);
+  void pumpEvents();
+  bool flipFrameInPlace();
   void renderFrame();
   void fail(const QString &reason);
 
@@ -43,10 +48,13 @@ class VideoRenderer final : public Renderer {
   mpv_render_context *renderContext_ = nullptr;
   QTimer frameTimer_;
   QImage frame_;
+  QByteArray flipScratch_;
   bool running_ = false;
   bool paused_ = false;
   bool failed_ = false;
+  std::atomic_bool framePending_{true};
   int frameCount_ = 0;
   qint64 fpsEpochMs_ = 0;
   double fps_ = 0.0;
+  bool sourceRateConfigured_ = false;
 };

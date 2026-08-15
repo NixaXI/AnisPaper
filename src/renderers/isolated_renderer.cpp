@@ -228,6 +228,13 @@ bool IsolatedRenderer::start(QString *error) {
       !env.contains(QStringLiteral("QT_QPA_PLATFORM"))) {
     env.insert(QStringLiteral("QT_QPA_PLATFORM"), QStringLiteral("wayland"));
   }
+  // The native scene engine owns a hidden GLFW/X11 window under XWayland.
+  // Keep its fullscreen detector on the X11 path even when the parent daemon
+  // itself is a Wayland service; otherwise pause-on-fullscreen cannot observe
+  // the game window reliably.
+  if (isScene) {
+    env.insert(QStringLiteral("XDG_SESSION_TYPE"), QStringLiteral("x11"));
+  }
   // The scene engine child renders offscreen through a hidden GLFW X11 window
   // (XWayland under Wayland), so it always needs a DISPLAY.
   if (!env.contains(QStringLiteral("DISPLAY"))) {
@@ -484,6 +491,7 @@ bool IsolatedRenderer::openSceneTransport(const QString &name) {
   }
   frame_ = target;
   sceneTransportFd_ = fd;
+  sceneTransportName_ = name;
   sceneTransportMap_ = mapping;
   sceneTransportMapSize_ = mapSize;
   sceneTransportLastSeq_ = 0;
@@ -508,6 +516,23 @@ void IsolatedRenderer::closeSceneTransport() {
     ::close(sceneTransportFd_);
     sceneTransportFd_ = -1;
   }
+  // The child normally unlinks its transport on orderly exit.  If it was
+  // killed, the open fd/mapping cleanup above is not enough: the named shm
+  // object would remain in /dev/shm and accumulate roughly 24 MiB per 1080p
+  // crash.  Only unlink the names from our own scene namespace; a malformed
+  // child message must never make the daemon remove an unrelated shm object.
+  if (sceneTransportName_.startsWith(QStringLiteral("/anispaper-scene-"))) {
+    const QString suffix = sceneTransportName_.mid(
+        QStringLiteral("/anispaper-scene-").size());
+    bool numeric = !suffix.isEmpty();
+    for (const QChar ch : suffix) {
+      numeric = numeric && ch >= QLatin1Char('0') && ch <= QLatin1Char('9');
+    }
+    if (numeric) {
+      ::shm_unlink(sceneTransportName_.toLocal8Bit().constData());
+    }
+  }
+  sceneTransportName_.clear();
   sceneTransportLastSeq_ = 0;
   sceneTransportView_ = {};
 }

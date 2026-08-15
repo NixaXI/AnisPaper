@@ -30,6 +30,7 @@ const emptySettings: Settings = {
   fpsCap: 30,
   defaultVolume: 1,
   retryQuota: 3,
+  gamingMode: "auto",
   wallpaper: { scaleMode: "cover" }
 };
 
@@ -59,6 +60,7 @@ function normalizeSettings(value: unknown): Settings {
     defaultVolume:
       typeof source.defaultVolume === "number" ? source.defaultVolume : emptySettings.defaultVolume,
     retryQuota: typeof source.retryQuota === "number" ? source.retryQuota : emptySettings.retryQuota,
+    gamingMode: source.gamingMode === "on" || source.gamingMode === "off" ? source.gamingMode : "auto",
     wallpaper: { scaleMode }
   };
 }
@@ -294,6 +296,7 @@ function SettingsPanel({
 }) {
   const [fps, setFps] = useState(settings.fpsCap);
   const [scaleMode, setScaleMode] = useState(settings.wallpaper.scaleMode);
+  const [gamingMode, setGamingMode] = useState(settings.gamingMode);
   return (
     <div className="settings-popover chamfer" role="dialog" aria-label="Configuración">
       <header>
@@ -318,11 +321,19 @@ function SettingsPanel({
           <option value="stretch">Stretch · libre</option>
         </select>
       </label>
+      <label>
+        Modo gaming
+        <select value={gamingMode} onChange={(event) => setGamingMode(event.target.value as Settings["gamingMode"])}>
+          <option value="auto">Auto · Steam/Proton</option>
+          <option value="on">Siempre pausado</option>
+          <option value="off">Desactivado</option>
+        </select>
+      </label>
       <div className="settings-actions">
         <button className="secondary-button" onClick={onRefresh}>↻ Catálogo</button>
         <button
           className="primary-button"
-          onClick={() => onSave({ fpsCap: fps, wallpaper: { scaleMode } })}
+          onClick={() => onSave({ fpsCap: fps, wallpaper: { scaleMode }, gamingMode })}
         >
           Guardar
         </button>
@@ -463,7 +474,15 @@ export default function App() {
       if (inFlight) return;
       inFlight = true;
       try {
-        const frame = await window.anispaper.rpc<PreviewFrame>("preview.frame", { output: liveOutput });
+        const frame = await window.anispaper.rpc<PreviewFrame>("preview.frame", {
+          output: liveOutput,
+          // The preview panel is never displayed at physical wallpaper size.
+          // Keep the legacy full-resolution response when callers omit these
+          // optional bounds, but avoid a 1920×1080 JPEG/base64 round-trip for
+          // the normal UI preview.
+          maxWidth: 960,
+          maxHeight: 540,
+        });
         if (alive) {
           setPreview(frame);
           setPreviewBusy(false);
@@ -583,7 +602,7 @@ export default function App() {
     }
     try {
       const result = await window.anispaper.savePreview(preview.data, `${selected.title || "anispaper"}-sddm`);
-      if (!result.canceled) showToast(`Preview JPEG guardado${result.path ? ` en ${result.path}` : ""}. F6 lo instala en SDDM.`);
+      if (!result.canceled) showToast(`Preview JPEG guardado${result.path ? ` en ${result.path}` : ""}. Luego actualizá la pantalla de inicio.`);
     } catch (error) {
       showToast(`No se pudo guardar el preview: ${errorMessage(error)}`);
     }
@@ -603,20 +622,25 @@ export default function App() {
     [showToast]
   );
 
-  // F6: sddm.snapshot (frame actual del renderer o fallback ANIS) +
-  // sddm.installTheme (tema staged + pkexec del helper anispaper-sddm-install).
+  // F6: sólo captura el frame activo del output elegido. Así no se instala
+  // accidentalmente un fallback/otro monitor en la pantalla de inicio.
   const updateSddm = useCallback(async () => {
     if (sddmBusy) return;
+    if (!selectedOutput) {
+      showToast("Elegí un monitor con un wallpaper activo antes de actualizar la pantalla de inicio.");
+      return;
+    }
     setSddmBusy(true);
     try {
       const snapshot = await window.anispaper.rpc<SddmSnapshotResult>(
         "sddm.snapshot",
-        selectedOutput ? { output: selectedOutput } : {}
+        { output: selectedOutput, requireActive: true }
       );
       const installed = await window.anispaper.rpc<SddmInstallResult>("sddm.installTheme");
-      showToast(`Tema SDDM actualizado (${snapshot.width}×${snapshot.height}) en ${installed.staged}.`);
+      const manager = installed.managerLabel || snapshot.managerLabel || "gestor de inicio";
+      showToast(`Wallpaper guardado para ${manager} (${snapshot.width}×${snapshot.height}, ${selectedOutput}).`);
     } catch (error) {
-      showToast(`No se pudo actualizar SDDM: ${errorMessage(error)}`);
+      showToast(`No se pudo actualizar la pantalla de inicio: ${errorMessage(error)}`);
     } finally {
       setSddmBusy(false);
     }
@@ -779,10 +803,10 @@ export default function App() {
             <span>★</span> Aplicar a {selectedOutput || "monitor"}
           </button>
           <button className="snapshot-button chamfer" onClick={() => void saveCurrentPreview()} disabled={!preview}>
-            <span>📸</span> Capturar para SDDM
+            <span>📸</span> Capturar para pantalla de inicio
           </button>
           <button className="snapshot-button chamfer" onClick={() => void updateSddm()} disabled={sddmBusy || !online}>
-            <span>⬢</span> {sddmBusy ? "Actualizando SDDM…" : "Actualizar SDDM"}
+            <span>⬢</span> {sddmBusy ? "Actualizando pantalla de inicio…" : "Actualizar pantalla de inicio"}
           </button>
           {selected?.id.startsWith("steam:") && (
             <button className="steam-link" onClick={() => void window.anispaper.openSteam(selected.id).catch((error) => showToast(errorMessage(error)))}>Abrir en Steam ↗</button>

@@ -313,3 +313,85 @@ salidas. `plasmashell` siguió vivo durante toda la prueba.
 La siguiente zona a medir, si alguna vez hiciera falta, es el upload/copia de
 Qt Quick en `plasmashell`; no se modificó aquí porque no había perfil de
 símbolos que justificara un cambio adicional.
+
+## F10 — 2026-08-13: fullscreen sin bloquear el daemon
+
+Se corrigió el detector X11 del child (XID nativo de GLFW, liberación correcta
+de la lista X11 y caché de 200 ms) y el child scene se fuerza a
+`XDG_SESSION_TYPE=x11` porque su ventana oculta usa XWayland.
+
+La consulta experimental a `org.kde.KWin.queryWindowInfo` fue retirada: en KWin
+6.7 esa API es un selector interactivo y devolvía `org.kde.KWin.Error.UserCancel`;
+llamarla desde un timer era la causa del cursor `+` y del bloqueo de clicks.
+No existe actualmente un throttle fullscreen activo en el daemon. Gaming Mode
+debe usar una fuente no interactiva y específica de juegos antes de reintroducir
+la suspensión automática.
+
+## Gaming Mode — 2026-08-13
+
+Se añadió un modo de protección para juegos con tres estados persistidos:
+`auto` (por defecto), `on` y `off`. En `auto` el daemon sólo inspecciona
+`/proc/*/{cmdline,environ}` buscando señales de Steam/Proton
+(`SteamAppId`, `SteamGameId`, `STEAM_COMPAT_APP_ID`, rutas
+`steamapps/common` o `compatdata`). No consulta KWin, no usa D-Bus y no lanza
+selectores ni herramientas X11. Al detectar el juego, cada renderer recibe
+`pause()` y conserva el último frame en su bridge; al salir recibe `resume()`.
+
+Verificación de transición contra el servicio:
+
+```sh
+python3 tools/perf/anispaper_rpc.py settings.set '{"gamingMode":"on"}'
+sleep 2
+python3 tools/perf/anispaper_rpc.py status.get
+python3 tools/perf/anispaper_rpc.py settings.set '{"gamingMode":"off"}'
+sleep 3
+python3 tools/perf/anispaper_rpc.py status.get
+python3 tools/perf/anispaper_rpc.py settings.set '{"gamingMode":"auto"}'
+```
+
+Con `on`, `gaming.active=true`, `gamingPaused=true` en DP-2 y HDMI-A-1 y los
+`frameNo` quedaron congelados con `hasFrame=true`. Con `off`, ambos avanzaron
+de nuevo y el watchdog permaneció limpio. La detección automática también se
+probó con un proceso efímero `env SteamAppId=999999 sleep 8`: activó el modo y
+se desactivó al terminar.
+
+Medición de 8 muestras (`top -b -n 8 -d 1`) en la misma sesión, dos salidas
+activas:
+
+| estado | plasmashell | anis-paperd | scene child | video child |
+|---|---:|---:|---:|---:|
+| activo | 282–309% | 58–63% | 22–27% | 61–70% |
+| Gaming Mode | 0–1% | 0% | 2–3% | 0% |
+
+La prueba de `SteamAppId` es una comprobación de detección, no una partida de
+SMITE 2. En una segunda pasada sí se observó SMITE 2 real (AppID 2437170,
+Proton/GE-Proton11-3): Gaming Mode automático quedó activo, ambos renderers
+quedaron pausados, `hasFrame=true`, `safeMode=false`, y ocho muestras de `top`
+mostraron `anis-paperd` 0–1%, scene 0–3%, video 0–2% y `plasmashell` 1%,
+mientras el proceso del juego se mantuvo alrededor de 644–685% (`top` por
+core). La sesión no tenía MangoHud ni un contador FPS exportado por el juego,
+por lo que no se inventa un FPS numérico; la comprobación visual de FPS debe
+hacerse dentro de SMITE con su overlay/contador de usuario.
+
+También se corrigió una carrera de arranque: si el juego ya estaba abierto,
+pausar el scene child antes de `ready` no arma el watchdog de startup; el límite
+se arma al reanudar. Tras reiniciar el daemon con SMITE activo ambos outputs
+quedaron `state=running`, `crashes=0`, `safeMode=false` y `hasFrame=true`.
+Cuando SMITE terminó, la detección volvió a `gaming.active=false` sin reiniciar
+los procesos: DP-2 reanudó a ~57.65 FPS y HDMI-A-1 a ~29.89 FPS, ambos con
+`hasFrame=true` y `crashes=0`.
+
+El pipeline normal sigue teniendo como costes principales el
+`glReadPixels`/JPEG de vídeo y la copia+upload de cada frame en el proveedor
+Plasma. El proveedor ahora mantiene el mmap por output (con remape al detectar
+recreación/secuencia reiniciada) y conserva la copia privada anti-tearing; el
+ABI SHM no cambió.
+
+### Preview RPC — optimización incremental
+
+`preview.frame` conserva la respuesta completa para clientes existentes, pero
+acepta opcionalmente `maxWidth` y `maxHeight` (enteros 64–3840) y reduce con
+`Qt::KeepAspectRatio` antes de JPEG/base64. La UI usa `960×540`, que coincide
+con el panel visible y evita transportar 1920×1080 innecesariamente. En la
+prueba RPC del servicio, la respuesta limitada fue `960×540` y la respuesta
+heredada sin límites siguió siendo `1920×1080`; ambas devolvieron JPEG válido.

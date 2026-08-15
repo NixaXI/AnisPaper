@@ -27,6 +27,7 @@ export interface Settings {
   fpsCap: number;
   defaultVolume: number;
   retryQuota: number;
+  gamingMode: "auto" | "on" | "off";
   wallpaper: { scaleMode: "cover" | "fit" | "stretch" };
 }
 
@@ -58,6 +59,7 @@ export interface DaemonStatus {
   catalog?: { items: number; scanning: boolean; generation: number };
   renderers?: RendererStatus[];
   watchdog?: { count: number; safeMode: boolean; backoffSeconds?: number[] };
+  gaming?: { mode?: "auto" | "on" | "off"; active?: boolean };
   socket?: { path: string; connections: number };
 }
 
@@ -81,12 +83,22 @@ export interface SddmSnapshotResult {
   width: number;
   height: number;
   output?: string;
+  manager?: string;
+  managerLabel?: string;
+  managerUnit?: string;
+  scope?: string;
+  lockScreenChanged?: boolean;
 }
 
 export interface SddmInstallResult {
   theme: string;
   installed: boolean;
-  staged: string;
+  manager?: string;
+  managerLabel?: string;
+  managerUnit?: string;
+  route?: string;
+  scope?: string;
+  staged?: string;
 }
 
 export interface SteamInstallResult {

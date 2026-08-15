@@ -2,25 +2,45 @@
 
 #include <QFile>
 #include <QFileInfo>
+#include <QMetaObject>
+#include <QTimer>
+#include <QThread>
 #include <QVariant>
 
 #include <KAuth/Action>
 #include <KAuth/ExecuteJob>
 #include <qdbusunixfiledescriptor.h>
 
-bool installPlasmaLoginWallpaper(const QString &pngPath, QString *error)
+void installPlasmaLoginWallpaperAsync(const QString &pngPath, QObject *context,
+                                       PlasmaLoginWallpaperCallback callback)
 {
+  auto finish = [context, callback = std::move(callback)](bool ok,
+                                                           const QString &message) mutable {
+    if (!context) return;
+    if (QThread::currentThread() == context->thread()) {
+      callback(ok, message);
+      return;
+    }
+    QMetaObject::invokeMethod(
+        context,
+        [callback = std::move(callback), ok, message]() mutable {
+          callback(ok, message);
+        },
+        Qt::QueuedConnection);
+  };
   const QFileInfo info(pngPath);
   if (!info.isFile() || !info.isReadable()) {
-    if (error) *error = QStringLiteral("Plasma Login wallpaper capture is not readable");
-    return false;
+    finish(false, QStringLiteral("Plasma Login wallpaper capture is not readable"));
+    return;
   }
 
-  QFile image(pngPath);
-  if (!image.open(QIODevice::ReadOnly)) {
-    if (error) *error = QStringLiteral("Plasma Login wallpaper capture could not be opened: %1")
-        .arg(image.errorString());
-    return false;
+  auto *image = new QFile(pngPath);
+  if (!image->open(QIODevice::ReadOnly)) {
+    const QString message = QStringLiteral("Plasma Login wallpaper capture could not be opened: %1")
+                                .arg(image->errorString());
+    delete image;
+    finish(false, message);
+    return;
   }
 
   // This is the exact config shape used by Plasma Login's KCM:
@@ -30,8 +50,9 @@ bool installPlasmaLoginWallpaper(const QString &pngPath, QString *error)
   QString config;
   QFile installedConfig(QStringLiteral("/etc/plasmalogin.conf"));
   if (installedConfig.exists() && installedConfig.size() > 1024 * 1024) {
-    if (error) *error = QStringLiteral("Plasma Login configuration exceeds the 1 MiB KAuth limit");
-    return false;
+    delete image;
+    finish(false, QStringLiteral("Plasma Login configuration exceeds the 1 MiB KAuth limit"));
+    return;
   }
   if (installedConfig.open(QIODevice::ReadOnly | QIODevice::Text) &&
       installedConfig.size() <= 1024 * 1024) {
@@ -50,18 +71,34 @@ bool installPlasmaLoginWallpaper(const QString &pngPath, QString *error)
   args.insert(QStringLiteral("config"), config);
   args.insert(QStringLiteral("wallpapers"), QStringList{QStringLiteral("anispaper.png")});
   args.insert(QStringLiteral("_fd_anispaper.png"),
-              QVariant::fromValue(QDBusUnixFileDescriptor(image.handle())));
+              QVariant::fromValue(QDBusUnixFileDescriptor(image->handle())));
 
   KAuth::Action action(QStringLiteral("org.kde.kcontrol.kcmplasmalogin.save"));
   action.setHelperId(QStringLiteral("org.kde.kcontrol.kcmplasmalogin"));
   action.setArguments(args);
-  std::unique_ptr<KAuth::ExecuteJob> job(action.execute());
-  if (!job || !job->exec()) {
-    if (error) {
-      const QString detail = job ? job->errorString() : QStringLiteral("KAuth job unavailable");
-      *error = QStringLiteral("Plasma Login KAuth save failed: %1").arg(detail);
-    }
-    return false;
+  KAuth::ExecuteJob *job = action.execute();
+  if (!job) {
+    delete image;
+    finish(false, QStringLiteral("Plasma Login KAuth save failed: KAuth job unavailable"));
+    return;
   }
-  return true;
+  image->setParent(job);
+  auto *timeout = new QTimer(job);
+  timeout->setSingleShot(true);
+  timeout->setInterval(30'000);
+  QObject::connect(timeout, &QTimer::timeout, job, [job] {
+    job->kill(KJob::EmitResult);
+  });
+  QObject::connect(job, &KAuth::ExecuteJob::result, context,
+                   [job, finish = std::move(finish)](KJob *) mutable {
+                     const bool ok = job->error() == 0;
+                     const QString detail = job->errorString();
+                     finish(ok, ok ? QString() :
+                                      QStringLiteral("Plasma Login KAuth save failed: %1")
+                                          .arg(detail.isEmpty() ? QStringLiteral("authorization failed")
+                                                                : detail));
+                     job->deleteLater();
+                   });
+  timeout->start();
+  job->start();
 }

@@ -33,6 +33,7 @@ class RendererManager final : public QObject {
   bool safeMode(const QString &output) const;
   QString wallpaperId(const QString &output) const;
   QJsonObject status() const;
+  void setGamingMode(const QString &mode);
 
  signals:
   void wallpaperActive(const QJsonObject &event);
@@ -79,9 +80,13 @@ class RendererManager final : public QObject {
   static int stableWindowMs();
   static int startupWindowMs(const RendererSpec &spec, bool sceneNativeUnsupported);
   static int scaledDelayMs(int seconds);
-
+  static bool steamGameRunning();
+  void refreshGamingState();
   QHash<QString, Entry *> byOutput_;
   QHash<QString, QSet<QString>> outputsByWallpaperId_;
   FrameBridgeManager bridges_;
   quint64 nextSerial_ = 1;
+  QTimer *gamingTimer_ = nullptr;
+  QString gamingMode_ = QStringLiteral("auto");
+  bool gamingActive_ = false;
 };

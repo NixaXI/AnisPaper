@@ -60,6 +60,7 @@ class IsolatedRenderer final : public Renderer {
   // "frame" events without a "jpeg" payload are plain notifications and the
   // pixel bytes are copied once from the mapped transport into frame_.
   int sceneTransportFd_ = -1;
+  QString sceneTransportName_;
   void *sceneTransportMap_ = nullptr;
   size_t sceneTransportMapSize_ = 0;
   quint64 sceneTransportLastSeq_ = 0;

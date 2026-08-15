@@ -31,7 +31,10 @@
 #include <QSet>
 #include <QHash>
 
+#include <fcntl.h>
+#include <signal.h>
 #include <sys/inotify.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -43,6 +46,39 @@
 #include <cmath>
 
 namespace {
+int g_shutdownPipeWrite = -1;
+
+void daemonSignalHandler(int) {
+  if (g_shutdownPipeWrite >= 0) {
+    const char byte = 1;
+    (void)::write(g_shutdownPipeWrite, &byte, sizeof(byte));
+  }
+}
+
+void removeStaleSceneTransports() {
+  const QDir shmDir(QStringLiteral("/dev/shm"));
+  const QStringList names = shmDir.entryList(
+      {QStringLiteral("anispaper-scene-*")}, QDir::System | QDir::Files);
+  static const QRegularExpression namePattern(
+      QStringLiteral("^anispaper-scene-([0-9]+)$"));
+  for (const QString &name : names) {
+    const auto match = namePattern.match(name);
+    if (!match.hasMatch()) continue;
+    const QString pid = match.captured(1);
+    const QString cmdlinePath = QStringLiteral("/proc/") + pid + QStringLiteral("/cmdline");
+    QFile cmdline(cmdlinePath);
+    const QByteArray command = cmdline.open(QIODevice::ReadOnly)
+                                   ? cmdline.read(4096)
+                                   : QByteArray();
+    if (command.contains("anis-paper-scene-engine")) continue;
+    const QByteArray nativeName = (QStringLiteral("/") + name).toLocal8Bit();
+    if (::shm_unlink(nativeName.constData()) == 0) {
+      qInfo().noquote() << "removed stale scene transport" << nativeName
+                        << "owner pid" << pid;
+    }
+  }
+}
+
 constexpr qsizetype kMaxRequestInput = 1024 * 1024;
 constexpr qsizetype kMaxResponse = 4 * 1024 * 1024;
 constexpr qint64 kMaxPending = 4LL * 1024 * 1024;
@@ -70,8 +106,13 @@ struct Settings {
   double defaultVolume=1.;
   int retryQuota=3;
   QString wallpaperScaleMode=QStringLiteral("cover");
+  QString gamingMode=QStringLiteral("auto");
   bool corrupt=false;
 };
+bool validGamingMode(const QString &value) {
+  return value == QStringLiteral("auto") || value == QStringLiteral("on") ||
+         value == QStringLiteral("off");
+}
 QJsonObject asJson(const Settings&s) {
   QJsonArray roots;
   for(const auto&x:s.customFolders) roots.append(x);
@@ -82,6 +123,7 @@ QJsonObject asJson(const Settings&s) {
           {"fpsCap",s.fpsCap},
           {"defaultVolume",s.defaultVolume},
           {"retryQuota",s.retryQuota},
+          {"gamingMode",s.gamingMode},
           {"wallpaper", QJsonObject{{"scaleMode", s.wallpaperScaleMode}}}};
 }
 
@@ -91,9 +133,12 @@ class SettingsStore {
     Settings s; QFile f(settingsPath()); if(!f.exists()) return s;
     if(!f.open(QIODevice::ReadOnly) || f.size()>5*1024*1024) return bad("settings unreadable or oversized");
     QJsonParseError e; auto d=QJsonDocument::fromJson(f.readAll(),&e); if(e.error!=QJsonParseError::NoError || !d.isObject()) return bad("settings corrupt: "+e.errorString());
-    auto o=d.object(); const QSet<QString> known{"customFolders","favorites","fpsCap","defaultVolume","retryQuota","wallpaper"}; for(auto it=o.begin();it!=o.end();++it) if(!known.contains(it.key())) return bad("settings has unknown fields");
+    auto o=d.object(); const QSet<QString> known{"customFolders","favorites","fpsCap","defaultVolume","retryQuota","gamingMode","wallpaper"}; for(auto it=o.begin();it!=o.end();++it) if(!known.contains(it.key())) return bad("settings has unknown fields");
     if(!o.value("customFolders").isArray() || !integerJson(o.value("fpsCap"),1,240) || !o.value("defaultVolume").isDouble() || o.value("defaultVolume").toDouble()<0 || o.value("defaultVolume").toDouble()>1 || !integerJson(o.value("retryQuota"),0,10)) return bad("settings values invalid");
     if (o.contains("favorites") && !o.value("favorites").isArray()) return bad("settings favorites invalid");
+    if (o.contains("gamingMode") &&
+        (!o.value("gamingMode").isString() ||
+         !validGamingMode(o.value("gamingMode").toString()))) return bad("settings gamingMode invalid");
     if (o.contains("wallpaper")) {
       const auto wallpaper=o.value("wallpaper");
       if(!wallpaper.isObject()) return bad("settings wallpaper invalid");
@@ -111,6 +156,7 @@ class SettingsStore {
       if(s.favorites.size()>10000) return bad("settings favorites invalid");
     }
     s.fpsCap=o.value("fpsCap").toInt(); s.defaultVolume=o.value("defaultVolume").toDouble(); s.retryQuota=o.value("retryQuota").toInt();
+    if (o.contains("gamingMode")) s.gamingMode=o.value("gamingMode").toString();
     return s;
   }
   bool save(const Settings&s, QString *error) {
@@ -450,6 +496,7 @@ class Daemon : public QObject {
     connect(renderers_, &RendererManager::wallpaperSafeMode, this,
             [this](const QJsonObject &event) { broadcast("wallpaper.safeMode", event); });
     settings_ = store_.load();
+    renderers_->setGamingMode(settings_.gamingMode);
     savedWallpapers_ = loadWallpaperState();
     refreshAsync();
   }
@@ -878,6 +925,8 @@ class Daemon : public QObject {
                                    {"count", watcher_.watchCount()},
                                    {"failures", watcher_.failures()}}},
             {"renderers", renderStatus.value("outputs")},
+            {"gaming", QJsonObject{{"mode", renderStatus.value("gamingMode")},
+                                    {"active", renderStatus.value("gamingActive")}}},
             {"watchdog", renderStatus.value("watchdog")},
             {"socket", QJsonObject{{"path", socketPath()},
                                     {"connections", clients_.size()}}}};
@@ -990,7 +1039,7 @@ class Daemon : public QObject {
       for (auto it = patch.begin(); it != patch.end(); ++it) {
         if (it.key() != "favorites" && it.key() != "fpsCap" && it.key() != "defaultVolume" &&
             it.key() != "retryQuota" && it.key() != "wallpaper.scaleMode" &&
-            it.key() != "wallpaper") {
+            it.key() != "wallpaper" && it.key() != "gamingMode") {
           fail(-32602, "unknown or immutable setting");
           return;
         }
@@ -1047,6 +1096,14 @@ class Daemon : public QObject {
         }
         next.retryQuota = patch.value("retryQuota").toInt();
       }
+      if (patch.contains("gamingMode")) {
+        const auto mode = patch.value("gamingMode");
+        if (!mode.isString() || !validGamingMode(mode.toString())) {
+          fail(-32602, "gamingMode must be auto, on or off");
+          return;
+        }
+        next.gamingMode = mode.toString();
+      }
       if (patch.contains("wallpaper.scaleMode") || patch.contains("wallpaper")) {
         QJsonValue mode;
         if (patch.contains("wallpaper.scaleMode")) {
@@ -1073,6 +1130,7 @@ class Daemon : public QObject {
       }
       settings_ = next;
       settings_.corrupt = false;
+      renderers_->setGamingMode(settings_.gamingMode);
       reply(asJson(settings_));
       return;
     }
@@ -1153,11 +1211,33 @@ class Daemon : public QObject {
         fail(-32602, "output is required");
         return;
       }
-      const QString output = params.toObject().value("output").toString();
-      const QImage frame = renderers_->lastFrame(output);
+      const auto object = params.toObject();
+      const QString output = object.value("output").toString();
+      const auto boundedDimension = [&object, &fail](const char *key) -> int {
+        if (!object.contains(QLatin1String(key))) return 0;
+        const QJsonValue value = object.value(QLatin1String(key));
+        if (!integerJson(value, 64, 3840)) {
+          fail(-32602, QStringLiteral("%1 must be an integer between 64 and 3840").arg(key));
+          return -1;
+        }
+        return value.toInt();
+      };
+      const int maxWidth = boundedDimension("maxWidth");
+      if (maxWidth < 0) return;
+      const int maxHeight = boundedDimension("maxHeight");
+      if (maxHeight < 0) return;
+      QImage frame = renderers_->lastFrame(output);
       if (frame.isNull()) {
         fail(-32001, "renderer unavailable");
         return;
+      }
+      if (maxWidth > 0 || maxHeight > 0) {
+        const int width = maxWidth > 0 ? maxWidth : frame.width();
+        const int height = maxHeight > 0 ? maxHeight : frame.height();
+        if (frame.width() > width || frame.height() > height) {
+          frame = frame.scaled(width, height, Qt::KeepAspectRatio,
+                               Qt::SmoothTransformation);
+        }
       }
       QByteArray jpeg;
       QBuffer buffer(&jpeg);
@@ -1267,19 +1347,41 @@ class Daemon : public QObject {
         return;
       }
       if (manager.kind == DisplayManagerKind::PlasmaLogin) {
-        QString plasmaError;
-        if (!installPlasmaLoginWallpaper(png, &plasmaError)) {
-          fail(-32004, plasmaError);
-          return;
-        }
-        reply(QJsonObject{{"theme", "org.kde.image"},
-                          {"installed", true},
-                          {"manager", displayManagerId(manager.kind)},
-                          {"managerLabel", displayManagerLabel(manager.kind)},
-                          {"managerUnit", manager.unit},
-                          {"route", "org.kde.kcontrol.kcmplasmalogin.save"},
-                          {"scope", "display-manager-greeter"},
-                          {"lockScreenChanged", false}});
+        // KAuth is asynchronous: while the greeter asks for credentials,
+        // status/preview and the renderers must remain responsive.
+        const QPointer<QLocalSocket> socketGuard(client->socket);
+        const QJsonValue requestId = id;
+        const bool requestHasId = hasId;
+        const QString managerId = displayManagerId(manager.kind);
+        const QString managerLabel = displayManagerLabel(manager.kind);
+        const QString managerUnit = manager.unit;
+        installPlasmaLoginWallpaperAsync(
+            png, this,
+            [this, socketGuard, requestId, requestHasId, managerId, managerLabel,
+             managerUnit](bool installed, const QString &plasmaError) {
+              if (!socketGuard || !requestHasId) return;
+              Client *target = nullptr;
+              for (auto *candidate : clients_) {
+                if (candidate->socket == socketGuard.data()) {
+                  target = candidate;
+                  break;
+                }
+              }
+              if (!target) return;
+              if (!installed) {
+                error(target, requestId, -32004, plasmaError);
+                return;
+              }
+              response(target, requestId,
+                       QJsonObject{{"theme", "org.kde.image"},
+                                   {"installed", true},
+                                   {"manager", managerId},
+                                   {"managerLabel", managerLabel},
+                                   {"managerUnit", managerUnit},
+                                   {"route", "org.kde.kcontrol.kcmplasmalogin.save"},
+                                   {"scope", "display-manager-greeter"},
+                                   {"lockScreenChanged", false}});
+            });
         return;
       }
       const QString stage = sddmConfigDir() + "/sddm-theme/anis-star";
@@ -1430,12 +1532,42 @@ int main(int argc, char **argv) {
   if (isRendererChildInvocation(argc, argv)) {
     return runRendererChild(argc, argv);
   }
+
+  int shutdownPipe[2] = {-1, -1};
+  if (::pipe2(shutdownPipe, O_CLOEXEC | O_NONBLOCK) != 0) {
+    fprintf(stderr, "anis-paperd: cannot create shutdown pipe: %s\n",
+            std::strerror(errno));
+    return 1;
+  }
+  struct sigaction shutdownAction {};
+  shutdownAction.sa_handler = daemonSignalHandler;
+  sigemptyset(&shutdownAction.sa_mask);
+  sigaction(SIGTERM, &shutdownAction, nullptr);
+  sigaction(SIGINT, &shutdownAction, nullptr);
+  g_shutdownPipeWrite = shutdownPipe[1];
+
   QCoreApplication app(argc, argv);
+  removeStaleSceneTransports();
+  QSocketNotifier shutdownNotifier(shutdownPipe[0], QSocketNotifier::Read);
+  QObject::connect(&shutdownNotifier, &QSocketNotifier::activated,
+                   &app, [&app, readFd = shutdownPipe[0]](qintptr) {
+                     char bytes[64];
+                     while (::read(readFd, bytes, sizeof(bytes)) > 0) {
+                     }
+                     app.quit();
+                   });
   Daemon daemon;
   QString error;
   if (!daemon.start(&error)) {
     fprintf(stderr, "anis-paperd: %s\n", error.toUtf8().constData());
+    g_shutdownPipeWrite = -1;
+    ::close(shutdownPipe[0]);
+    ::close(shutdownPipe[1]);
     return 1;
   }
-  return app.exec();
+  const int result = app.exec();
+  g_shutdownPipeWrite = -1;
+  ::close(shutdownPipe[0]);
+  ::close(shutdownPipe[1]);
+  return result;
 }

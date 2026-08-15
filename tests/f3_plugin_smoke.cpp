@@ -130,6 +130,7 @@ Item {
         objectName: "bridgeImage"
         anchors.fill: parent
         cache: false
+        retainWhileLoading: true
         source: "image://anispaper/F3-QML?f=" + parent.frameNo
     }
 }
@@ -164,6 +165,12 @@ Item {
                     "provider did not map the initial bridge frame") &&
             require(first.pixelColor(2, 2).red() > 180,
                     "initial bridge frame is not the published red image");
+  QSize downsampledSize;
+  const QImage downsampled = provider ? provider->requestImage(
+      QStringLiteral("F3-QML?f=1"), &downsampledSize, QSize(48, 32)) : QImage();
+  ok = require(!downsampled.isNull() && downsampledSize.width() <= 48 &&
+                   downsampledSize.height() <= 32,
+               "provider ignored the QML requested display size") && ok;
 
   // The bridge's physical backing store must never silently distort a source
   // frame.  Check all three explicit scale modes through the same provider
@@ -224,6 +231,24 @@ Item {
   ok = require(!second.isNull() && second.pixelColor(2, 2).blue() > 180,
                "provider did not expose the new bridge frame") && ok;
 
+  // Regression guard for the Plasma symptom: changing the provider URL at
+  // publication rate must retain a visible texture while the next image is
+  // loaded.  A blank grab means the backing #0A0D14 rectangle leaked through.
+  int blankGrabs = 0;
+  for (int tick = 3; tick < 15; ++tick) {
+    error.clear();
+    ok = require(bridge.publish((tick % 2) ? solid(Qt::red) : solid(Qt::blue),
+                                &error), error.toUtf8().constData()) && ok;
+    root->setProperty("frameNo", tick);
+    spin(20);
+    const QImage grabbed = view.grabWindow();
+    if (grabbed.isNull() || grabbed.pixelColor(48, 32).value() < 40) {
+      ++blankGrabs;
+    }
+  }
+  ok = require(blankGrabs == 0,
+               "provider URL updates exposed a blank frame while loading") && ok;
+
   QSize fallbackSize;
   const QImage missing = provider ? provider->requestImage(QStringLiteral("F3-MISSING?f=1"),
                                                             &fallbackSize, {})
@@ -253,8 +278,9 @@ Item {
                                                               &nativeSize, {})
                                     : QImage();
   ok = require(!resetTick.isNull() && !recovered.isNull() &&
+                   resetTick.pixelColor(2, 2).blue() > 180 &&
                    recovered.pixelColor(2, 2).green() > 100,
-               "sequence reset returned an invalid or stale image") && ok;
+               "sequence reset flashed a fallback or returned a stale image") && ok;
 
   FrameBridge other;
   error.clear();

@@ -55,3 +55,20 @@ CODEX.md
 .postman/
 postman/
 # --- END ANISPAPER PUBLIC REPO ---
+
+# Generated profiling / validation artifacts
+tools/f1/artifacts/
+tools/perf/artifacts/
+tools/scene/artifacts/
+tools/scene/captures/
+
+# Performance datasets
+*-soak-*.csv
+*-soak-*.json
+*-sample-*.csv
+
+# Profiling output
+*.trace
+perf.data
+perf.data.old
+callgrind.out.*

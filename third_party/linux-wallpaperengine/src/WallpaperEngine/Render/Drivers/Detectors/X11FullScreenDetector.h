@@ -1,6 +1,8 @@
 #pragma once
 
 #include <glm/vec4.hpp>
+#include <chrono>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -28,6 +30,11 @@ namespace Detectors {
 	Window m_root;
 	std::map<std::string, glm::ivec4> m_screens = {};
 	VideoDriver& m_driver;
-    };
+	// XQueryTree/XGetWindowAttributes are synchronous X11 round trips.  The
+	// wallpaper only needs to react within the existing 250 ms fullscreen
+	// pause cadence, so avoid issuing them on every render frame.
+	mutable std::chrono::steady_clock::time_point m_cacheUntil {};
+	mutable bool m_cachedFullscreen = false;
+	};
 } // namespace Detectors
 } // namespace WallpaperEngine::Render::Drivers

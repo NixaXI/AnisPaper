@@ -54,6 +54,7 @@ CSV_COLUMNS = (
     "pixel_format",
     "buffers",
     "preview_jpeg",
+    "capture_path",
     "daemon_rpc_alive",
     "cleanup_entry_gone",
     "cleanup_residual_pids",
@@ -245,6 +246,28 @@ def atomic_text(path: pathlib.Path, text: str) -> None:
             stream.write(text)
             if not text.endswith("\n"):
                 stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+            temporary = pathlib.Path(stream.name)
+        os.replace(temporary, path)
+    except BaseException:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def atomic_bytes(path: pathlib.Path, data: bytes) -> None:
+    """Persist a bounded capture without exposing a partial file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: pathlib.Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb", dir=path.parent, prefix=path.name + ".", delete=False
+        ) as stream:
+            stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
             temporary = pathlib.Path(stream.name)
@@ -718,6 +741,26 @@ def valid_preview(preview: Any) -> tuple[bool, dict[str, Any]]:
     return True, details
 
 
+def save_preview_capture(
+    preview: Any, captures_dir: pathlib.Path | None, index: int, item: dict[str, Any]
+) -> str | None:
+    if captures_dir is None or not isinstance(preview, dict):
+        return None
+    encoded = preview.get("data")
+    if not isinstance(encoded, str):
+        return None
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError):
+        return None
+    if not data.startswith(b"\xff\xd8") or not data.endswith(b"\xff\xd9"):
+        return None
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(item.get("id", "unknown")))
+    path = captures_dir / f"scene_{index:04d}_{safe_id}_frame1.jpg"
+    atomic_bytes(path, data)
+    return str(path)
+
+
 def transport_measurement(
     samples_by_pid: dict[int, list[tuple[float, int]]], scene_started_mono: float
 ) -> dict[str, Any] | None:
@@ -883,6 +926,8 @@ def verify_scene(
     connected: set[str],
     timeout: float,
     log_path: pathlib.Path,
+    captures_dir: pathlib.Path | None,
+    scene_index: int,
     plasma_baseline: dict[int, str],
     owned_outputs: set[str],
 ) -> dict[str, Any]:
@@ -1089,6 +1134,11 @@ def verify_scene(
                         preview_ok, preview_details = valid_preview(preview)
                         record["preview_jpeg"] = preview_ok
                         record["preview"] = preview_details
+                        if preview_ok:
+                            record["capture_path"] = save_preview_capture(
+                                preview, captures_dir, scene_index, item
+                            )
+                            record["visual_check"] = "RPC_PREVIEW"
                     except Exception as exc:
                         record["preview"] = {"error": str(exc)}
                 measurement = transport_measurement(transport_samples, scene_started_mono)
@@ -1379,6 +1429,11 @@ def parse_args() -> argparse.Namespace:
         help="per-Scene log directory (default: sibling <summary-stem>-logs)",
     )
     parser.add_argument(
+        "--captures-dir",
+        type=pathlib.Path,
+        help="directory for one atomic JPEG preview capture per valid Scene",
+    )
+    parser.add_argument(
         "--sample", type=int, default=0, help="verify at most N catalog scene items (0 means all)"
     )
     parser.add_argument(
@@ -1398,10 +1453,13 @@ def parse_args() -> argparse.Namespace:
         parser.error("--timeout must be between 1 and 60 seconds")
     args.csv = args.csv or args.summary.with_suffix(".csv")
     args.logs_dir = args.logs_dir or args.summary.parent / f"{args.summary.stem}-logs"
+    args.captures_dir = args.captures_dir or args.summary.parent / f"{args.summary.stem}-captures"
     if args.csv == args.summary:
         parser.error("--summary and --csv must be different paths")
     if args.logs_dir in (args.summary, args.csv):
         parser.error("--logs-dir must be a directory distinct from report files")
+    if args.captures_dir in (args.summary, args.csv, args.logs_dir):
+        parser.error("--captures-dir must be a directory distinct from report files/logs")
     return args
 
 
@@ -1418,6 +1476,7 @@ def main() -> int:
         "summaryPath": str(args.summary),
         "csvPath": str(args.csv),
         "logsDirectory": str(args.logs_dir),
+        "capturesDirectory": str(args.captures_dir),
         "syntheticOutputPrefix": SYNTHETIC_PREFIX,
         "runToken": run_token,
         "protectedOutputs": sorted(PROTECTED_OUTPUTS),
@@ -1477,6 +1536,8 @@ def main() -> int:
                     connected,
                     args.timeout,
                     log_path,
+                    args.captures_dir,
+                    index,
                     plasma_baseline,
                     owned_outputs,
                 )

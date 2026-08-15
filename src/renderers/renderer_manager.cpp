@@ -7,10 +7,13 @@
 
 #include <QFile>
 #include <QFileInfo>
+#include <QDir>
 #include <QTimer>
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
+#include <unistd.h>
 
 namespace {
 constexpr int kCrashThreshold = 3;
@@ -33,7 +36,13 @@ RendererManager &RendererManager::instance(QObject *parent) {
   return *manager;
 }
 
-RendererManager::RendererManager(QObject *parent) : QObject(parent) {}
+RendererManager::RendererManager(QObject *parent) : QObject(parent) {
+  gamingTimer_ = new QTimer(this);
+  gamingTimer_->setInterval(1000);
+  connect(gamingTimer_, &QTimer::timeout, this,
+          &RendererManager::refreshGamingState);
+  gamingTimer_->start();
+}
 
 RendererManager::~RendererManager() {
   const auto outputs = byOutput_.keys();
@@ -183,10 +192,14 @@ QJsonObject RendererManager::stop(const QString &output) {
 QImage RendererManager::lastFrame(const QString &output) const {
   const Entry *entry = byOutput_.value(output, nullptr);
   if (!entry) return {};
-  if (entry->renderer) return entry->renderer->lastFrame();
+  if (entry->renderer) {
+    const QImage frame = entry->renderer->lastFrame();
+    if (!frame.isNull()) return frame;
+  }
   // A child can die between watchdog attempts.  handleFailure() has already
-  // published a static image to the existing bridge, so previews remain
-  // usable during that bounded restart window instead of returning -32001.
+  // published a static image to the existing bridge.  The same bridge
+  // fallback is also used while Gaming Mode pauses a child before its first
+  // frame, so previews remain usable instead of returning -32001.
   return bridges_.snapshot(output);
 }
 
@@ -213,11 +226,71 @@ QJsonObject RendererManager::status() const {
     anySafeMode = anySafeMode || entry->safeMode;
   }
   return {{QStringLiteral("outputs"), outputs},
+          {QStringLiteral("gamingMode"), gamingMode_},
+          {QStringLiteral("gamingActive"), gamingActive_},
           {QStringLiteral("watchdog"),
            QJsonObject{{QStringLiteral("count"), totalCrashes},
                        {QStringLiteral("safeMode"), anySafeMode},
                        {QStringLiteral("backoffSeconds"), QJsonArray{1, 3, 9}},
                        {QStringLiteral("stableResetSeconds"), 60}}}};
+}
+
+void RendererManager::setGamingMode(const QString &mode) {
+  const QString normalized = mode.trimmed().toLower();
+  gamingMode_ = (normalized == QStringLiteral("on") ||
+                 normalized == QStringLiteral("off"))
+                    ? normalized
+                    : QStringLiteral("auto");
+  refreshGamingState();
+}
+
+bool RendererManager::steamGameRunning() {
+  QDir proc(QStringLiteral("/proc"));
+  const QString self = QString::number(static_cast<qint64>(::getpid()));
+  const QStringList pids = proc.entryList({QStringLiteral("[0-9]*")},
+                                            QDir::Dirs | QDir::NoDotAndDotDot,
+                                            QDir::Name);
+  for (const QString &pid : pids) {
+    if (pid == self) continue;
+    QFile cmdFile(QStringLiteral("/proc/") + pid + QStringLiteral("/cmdline"));
+    QFile envFile(QStringLiteral("/proc/") + pid + QStringLiteral("/environ"));
+    if (!cmdFile.open(QIODevice::ReadOnly)) continue;
+    const QByteArray cmd = cmdFile.read(256 * 1024);
+    if (cmd.contains("steamwebhelper") || cmd.contains("steam-runtime")) continue;
+    bool steamApp = false;
+    if (envFile.open(QIODevice::ReadOnly)) {
+      const QByteArray env = envFile.read(256 * 1024);
+      steamApp = env.contains("STEAM_COMPAT_APP_ID=") ||
+                 env.contains("SteamAppId=") || env.contains("SteamGameId=");
+    }
+    if (steamApp) return true;
+    const QString command = QString::fromLocal8Bit(cmd);
+    if (command.contains(QStringLiteral("/steamapps/common/")) &&
+        !command.contains(QStringLiteral("steam.exe"), Qt::CaseInsensitive)) return true;
+    if ((command.contains(QStringLiteral("wine"), Qt::CaseInsensitive) ||
+         command.contains(QStringLiteral("pressure-vessel"), Qt::CaseInsensitive)) &&
+        command.contains(QStringLiteral("/compatdata/"))) return true;
+  }
+  return false;
+}
+
+void RendererManager::refreshGamingState() {
+  const bool active = gamingMode_ == QStringLiteral("on") ||
+                      (gamingMode_ == QStringLiteral("auto") && steamGameRunning());
+  if (active == gamingActive_) return;
+  gamingActive_ = active;
+  for (Entry *entry : std::as_const(byOutput_)) {
+    if (!entry || !entry->renderer) continue;
+    if (gamingActive_) {
+      entry->renderer->pause();
+    } else if (entry->renderer->isRunning()) {
+      entry->renderer->resume();
+      if (!entry->rendererReady && !entry->safeMode) {
+        entry->startupTimer->start(startupWindowMs(entry->spec,
+                                                   entry->sceneNativeUnsupported));
+      }
+    }
+  }
 }
 
 RendererSpec RendererManager::makeSpec(const QJsonObject &item,
@@ -315,7 +388,14 @@ void RendererManager::createRenderer(Entry *entry, bool staticFallback) {
     });
     return;
   }
-  if (!staticFallback && !entry->rendererReady) {
+  if (gamingActive_ && !staticFallback) {
+    renderer->pause();
+  }
+  // A renderer may be intentionally paused before it emits ready when a game
+  // is already running (notably the native scene child).  Do not turn that
+  // deliberate pause into a watchdog crash; arm the startup deadline when
+  // Gaming Mode resumes the renderer instead.
+  if (!staticFallback && !entry->rendererReady && !gamingActive_) {
     entry->startupTimer->start(startupWindowMs(entry->spec, entry->sceneNativeUnsupported));
   }
 }
@@ -473,6 +553,7 @@ QJsonObject RendererManager::statusFor(const Entry *entry) const {
                 (entry->renderer && entry->renderer->isFallback()) ||
                     (!entry->renderer && !currentFrame.isNull()));
   result.insert(QStringLiteral("lastBackoffSeconds"), entry->lastBackoffSeconds);
+  result.insert(QStringLiteral("gamingPaused"), gamingActive_);
   result.insert(QStringLiteral("bridge"), bridges_.statusFor(entry->output));
   return result;
 }
