@@ -193,6 +193,8 @@ bool IsolatedRenderer::start(QString *error) {
                        QStringLiteral("--width"), QString::number(spec_.width),
                        QStringLiteral("--height"), QString::number(spec_.height),
                        QStringLiteral("--fps"), QString::number(spec_.fps),
+                       QStringLiteral("--volume"),
+                       QString::number(qBound(0, qRound(spec_.volume * 128.0), 128)),
                        QStringLiteral("--scaling"), scaling};
   }
   if (!spec_.preview.isEmpty() && !isScene) {
@@ -234,11 +236,49 @@ bool IsolatedRenderer::start(QString *error) {
   // the game window reliably.
   if (isScene) {
     env.insert(QStringLiteral("XDG_SESSION_TYPE"), QStringLiteral("x11"));
+    // Fullscreen geometry is not evidence of a game.  The daemon's
+    // evidence-based Gaming Mode owns pause/resume for all renderer types.
+    env.insert(QStringLiteral("ANISPAPER_SCENE_NO_FULLSCREEN_PAUSE"), QStringLiteral("1"));
   }
+  // Use a dedicated Pulse/PipeWire client name so stream-restore does not
+  // reuse an old "mpv muted at 0%" session from a previous wallpaper.
+  env.insert(QStringLiteral("PULSE_PROP_application.name"),
+             QStringLiteral("AnisPaper"));
+  env.insert(QStringLiteral("PULSE_PROP_media.role"), QStringLiteral("music"));
   // The scene engine child renders offscreen through a hidden GLFW X11 window
   // (XWayland under Wayland), so it always needs a DISPLAY.
   if (!env.contains(QStringLiteral("DISPLAY"))) {
     env.insert(QStringLiteral("DISPLAY"), QStringLiteral(":0"));
+  }
+  // A user service can start before the graphical session exports XAUTHORITY
+  // to the user manager.  XWayland still creates its per-session cookie in
+  // the runtime directory, so discover that exact file for the isolated
+  // scene child instead of launching GLFW unauthenticated.  Restrict this to
+  // the user-owned runtime directory and the conventional xauth_* name; do
+  // not inspect home directories or invoke xauth helpers.
+  if (isScene) {
+    const QString runtime = env.value(QStringLiteral("XDG_RUNTIME_DIR"));
+    const QFileInfo configuredAuth(env.value(QStringLiteral("XAUTHORITY")));
+    const bool configuredAuthUsable =
+        configuredAuth.isFile() && !configuredAuth.isSymLink() &&
+        configuredAuth.isReadable() && configuredAuth.ownerId() == geteuid();
+    if (!configuredAuthUsable) {
+      const QFileInfo runtimeInfo(runtime);
+      if (runtimeInfo.isDir() && !runtimeInfo.isSymLink() &&
+          runtimeInfo.ownerId() == geteuid()) {
+        const QFileInfoList candidates = QDir(runtime).entryInfoList(
+            {QStringLiteral("xauth_*")}, QDir::Files | QDir::Readable |
+                                          QDir::NoSymLinks,
+            QDir::Time);
+        for (const QFileInfo &candidate : candidates) {
+          if (candidate.isFile() && candidate.ownerId() == geteuid()) {
+            env.insert(QStringLiteral("XAUTHORITY"),
+                      candidate.absoluteFilePath());
+            break;
+          }
+        }
+      }
+    }
   }
   process_.setProcessEnvironment(env);
   process_.setProgram(program);
@@ -297,6 +337,13 @@ void IsolatedRenderer::pause() { sendCommand(QStringLiteral("pause")); }
 
 void IsolatedRenderer::resume() { sendCommand(QStringLiteral("resume")); }
 
+void IsolatedRenderer::applyPlayback(int fps, double volume) {
+  Renderer::applyPlayback(fps, volume);
+  sendJson({{QStringLiteral("command"), QStringLiteral("configure")},
+            {QStringLiteral("fps"), spec_.fps},
+            {QStringLiteral("volume"), spec_.volume}});
+}
+
 QImage IsolatedRenderer::lastFrame() const {
   // Native Scene frames are directly copied to the bridge.  Keep previews and
   // explicit snapshots independent by taking an owned bridge snapshot only on
@@ -326,10 +373,13 @@ qint64 IsolatedRenderer::processId() const { return childPid_; }
 double IsolatedRenderer::frameRate() const { return fps_; }
 
 void IsolatedRenderer::sendCommand(const QString &command) {
+  sendJson({{QStringLiteral("command"), command}});
+}
+
+void IsolatedRenderer::sendJson(const QJsonObject &message) {
   if (process_.state() == QProcess::NotRunning) {
     return;
   }
-  const QJsonObject message{{QStringLiteral("command"), command}};
   process_.write(QJsonDocument(message).toJson(QJsonDocument::Compact) + '\n');
 }
 

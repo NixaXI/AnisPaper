@@ -83,7 +83,7 @@ bool X11FullScreenDetector::anythingFullscreen () const {
 	const auto* glfwDriver = dynamic_cast<const GLFWOpenGLDriver*> (&this->m_driver);
 	const auto glfwWindow = glfwDriver ? glfwDriver->getWindow () : nullptr;
 	const Window ourWindow = glfwWindow ? glfwGetX11Window (glfwWindow) : 0;
-	Window parentWindow;
+	Window parentWindow = 0;
 
 	{
 	Window root, *schildren = nullptr;

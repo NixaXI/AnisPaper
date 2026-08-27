@@ -12,7 +12,9 @@
 #include <QSocketNotifier>
 #include <QTextStream>
 #include <QTimer>
+#include <QDateTime>
 
+#include <atomic>
 #include <memory>
 #include <cmath>
 
@@ -22,6 +24,45 @@
 #include <unistd.h>
 
 namespace {
+bool benchRenderFramesEnabled() {
+  static const bool enabled =
+      qEnvironmentVariable("ANISPAPER_BENCH_RENDER_FRAMES") == QStringLiteral("1");
+  return enabled;
+}
+
+std::atomic<quint64> g_benchRenderFrames{0};
+std::atomic<qint64> g_benchRenderEpochMs{0};
+
+void benchRecordCompletedFrame() {
+  if (!benchRenderFramesEnabled()) {
+    return;
+  }
+  qint64 expected = 0;
+  const qint64 now = QDateTime::currentMSecsSinceEpoch();
+  if (g_benchRenderEpochMs.compare_exchange_strong(expected, now)) {
+    // first frame establishes the epoch
+  }
+  g_benchRenderFrames.fetch_add(1, std::memory_order_relaxed);
+}
+
+void benchReportRenderFrames(const char *phase) {
+  if (!benchRenderFramesEnabled()) {
+    return;
+  }
+  const quint64 frames = g_benchRenderFrames.load(std::memory_order_relaxed);
+  const qint64 epoch = g_benchRenderEpochMs.load(std::memory_order_relaxed);
+  const qint64 elapsedMs =
+      epoch > 0 ? QDateTime::currentMSecsSinceEpoch() - epoch : 0;
+  const double elapsedS = elapsedMs > 0 ? static_cast<double>(elapsedMs) / 1000.0 : 0.0;
+  const double fps = elapsedMs > 0 ? static_cast<double>(frames) * 1000.0 /
+                                           static_cast<double>(elapsedMs) :
+                                     0.0;
+  fprintf(stderr,
+          "bench_render_frames phase=%s frames=%llu elapsed_s=%.3f fps=%.2f\n",
+          phase, static_cast<unsigned long long>(frames), elapsedS, fps);
+  fflush(stderr);
+}
+
 class ChildProtocol final : public QObject {
  public:
   explicit ChildProtocol(Renderer *renderer, QObject *parent = nullptr)
@@ -37,6 +78,13 @@ class ChildProtocol final : public QObject {
                {QStringLiteral("message"), reason}});
       QTimer::singleShot(0, qApp, [] { QCoreApplication::exit(2); });
     });
+    if (benchRenderFramesEnabled()) {
+      auto *reportTimer = new QTimer(this);
+      reportTimer->setInterval(30000);
+      connect(reportTimer, &QTimer::timeout, this,
+              [] { benchReportRenderFrames("periodic"); });
+      reportTimer->start();
+    }
   }
 
   void publishReady() {
@@ -69,6 +117,11 @@ class ChildProtocol final : public QObject {
         renderer_->pause();
       } else if (command == QStringLiteral("resume")) {
         renderer_->resume();
+      } else if (command == QStringLiteral("configure")) {
+        const auto object = document.object();
+        const int fps = object.value(QStringLiteral("fps")).toInt(renderer_->spec().fps);
+        const double volume = object.value(QStringLiteral("volume")).toDouble(renderer_->spec().volume);
+        renderer_->applyPlayback(fps, volume);
       } else if (command == QStringLiteral("stop")) {
         renderer_->stop();
         QCoreApplication::quit();
@@ -78,6 +131,11 @@ class ChildProtocol final : public QObject {
 
   void publishFrame(const QImage &image) {
     if (image.isNull()) {
+      return;
+    }
+    benchRecordCompletedFrame();
+    if (qEnvironmentVariable("ANISPAPER_BENCH_SKIP_FRAME_PUBLISH") ==
+        QStringLiteral("1")) {
       return;
     }
     QByteArray jpeg;
@@ -232,6 +290,7 @@ int runRendererChild(int argc, char **argv) {
   }
   protocol.publishReady();
   const int result = app.exec();
+  benchReportRenderFrames("final");
   renderer->stop();
   return result;
 }

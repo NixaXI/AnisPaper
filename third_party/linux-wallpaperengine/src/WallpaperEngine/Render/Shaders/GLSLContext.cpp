@@ -17,17 +17,17 @@ TBuiltInResource BuiltInResource = { .maxLights = 32,
 				     .maxTextureCoords = 32,
 				     .maxVertexAttribs = 64,
 				     .maxVertexUniformComponents = 4096,
-				     .maxVaryingFloats = 64,
+				     .maxVaryingFloats = 128,
 				     .maxVertexTextureImageUnits = 32,
 				     .maxCombinedTextureImageUnits = 80,
 				     .maxTextureImageUnits = 32,
 				     .maxFragmentUniformComponents = 4096,
 				     .maxDrawBuffers = 32,
-				     .maxVertexUniformVectors = 128,
-				     .maxVaryingVectors = 8,
-				     .maxFragmentUniformVectors = 16,
-				     .maxVertexOutputVectors = 16,
-				     .maxFragmentInputVectors = 15,
+				     .maxVertexUniformVectors = 256,
+				     .maxVaryingVectors = 32,
+				     .maxFragmentUniformVectors = 256,
+				     .maxVertexOutputVectors = 32,
+				     .maxFragmentInputVectors = 32,
 				     .minProgramTexelOffset = -8,
 				     .maxProgramTexelOffset = 7,
 				     .maxClipDistances = 8,
@@ -145,7 +145,8 @@ std::pair<std::string, std::string> GLSLContext::toGlsl (const std::string& vert
 
     if (!vertexShader.parse (&BuiltInResource, 100, false, EShMsgDefault)) {
 	sLog.error ("GLSL vertex unit parsing Failed: ", vertexShader.getInfoLog ());
-	return { "", "" };
+	sLog.error ("AnisPaper: compiling original vertex/fragment units (SPIR-V skipped)");
+	return { vertex, fragment };
     }
     glslang::TShader fragmentShader (EShLangFragment);
 
@@ -160,7 +161,8 @@ std::pair<std::string, std::string> GLSLContext::toGlsl (const std::string& vert
 
     if (!fragmentShader.parse (&BuiltInResource, 100, false, EShMsgDefault)) {
 	sLog.error ("GLSL fragment unit parsing Failed: ", fragmentShader.getInfoLog ());
-	return { "", "" };
+	sLog.error ("AnisPaper: compiling original vertex/fragment units (SPIR-V skipped)");
+	return { vertex, fragment };
     }
     glslang::TProgram program;
     program.addShader (&vertexShader);
@@ -168,7 +170,8 @@ std::pair<std::string, std::string> GLSLContext::toGlsl (const std::string& vert
 
     if (!program.link (EShMsgDefault)) {
 	sLog.error ("Program Linking Failed: ", program.getInfoLog ());
-	return { "", "" };
+	sLog.error ("AnisPaper: compiling original vertex/fragment units (SPIR-V skipped)");
+	return { vertex, fragment };
     }
 
     std::vector<uint32_t> spirv;

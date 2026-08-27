@@ -9,7 +9,7 @@
 class QWebEngineView;
 
 // QtWebEngine renderer.  It runs inside the isolated worker and samples the
-// widget through QWidget::grab at the configured fps (normally 30).
+// widget through QWidget::grab at the configured fps (normally 60).
 class WebRenderer final : public Renderer {
   Q_OBJECT
 
@@ -26,6 +26,7 @@ class WebRenderer final : public Renderer {
   bool isRunning() const override;
   bool isFallback() const override;
   double frameRate() const override;
+  void applyPlayback(int fps, double volume) override;
 
  private:
   void captureFrame();

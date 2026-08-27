@@ -18,43 +18,65 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 
 
 def verify_ui_dp2_payload():
-    source = (REPO / "ui/src/App.tsx").read_text(encoding="utf-8")
-    select_contract = (
-        '<option key={monitor.name} value={monitor.name}>' in source and
-        'onChange={(event) => setSelectedOutput(event.target.value)}' in source
-    )
-    apply_contract = (
-        'window.anispaper.rpc("wallpaper.apply", { id: selected.id, output: selectedOutput })'
-        in source
-    )
-    require(select_contract and apply_contract,
-            "UI no conserva monitor.name hasta wallpaper.apply output")
-    # This is the exact data-flow instantiated for the requested connector:
-    # monitor.name -> option.value -> event.target.value -> selectedOutput.
+    qml = (REPO / "src/ui/qml/Main.qml").read_text(encoding="utf-8")
+    rpc = (REPO / "src/ui/rpc_client.cpp").read_text(encoding="utf-8")
+    require(
+        "model: client.monitorNames" in qml and
+        "client.selectedOutput = currentText" in qml,
+        "UI no conserva monitor.name hasta el ComboBox de salida")
+    require(
+        'send("wallpaper.apply", {{"id", selectedId_}, {"output", selectedOutput_}}' in rpc,
+        "UI no envía wallpaper.apply con selectedId/selectedOutput")
     selected_output = "DP-2"
     payload = {"id": "steam:400", "output": selected_output}
     require(payload["output"] == "DP-2", f"UI DP-2 payload changed: {payload}")
 
 
 def verify_preview_throttle_does_not_gate_apply():
-    source = (REPO / "ui/electron/main.ts").read_text(encoding="utf-8")
-    require(
-        'if (method === "preview.frame"' in source and
-        'return this.callPreview<T>(params.output, params);' in source and
-        'return this.callRaw<T>(method, params);' in source,
-        "preview throttle is not isolated to preview.frame"
-    )
-    require(
-        'const PREVIEW_UNAVAILABLE_RETRY_MS = 750;' in source and
-        'this.previewInFlight.get(output)' in source and
-        'this.previewDelay.set(output, { timer, reject });' in source,
-        "preview backoff no longer deduplicates one probe per output"
-    )
-    require(
-        'this.cancelPreviewDelays("La aplicación se está cerrando.");' in source and
-        'this.cancelPreviewDelays(message);' in source,
-        "delayed preview probes are not cancelled on stop/disconnect"
-    )
+    rpc = (REPO / "src/ui/rpc_client.cpp").read_text(encoding="utf-8")
+    header = (REPO / "src/ui/rpc_client.h").read_text(encoding="utf-8")
+    require("__anispaper-ui-preview__" not in rpc and
+            "preview.frame" not in rpc,
+            "la UI Qt no debe abrir un renderer de preview aislado")
+    require("wallpaper.stop" not in header and
+            'send("wallpaper.stop"' in rpc and
+            "disconnectDaemon" in rpc,
+            "wallpaper.stop debe existir como acción explícita")
+    disconnect = rpc[rpc.index("void RpcClient::disconnectDaemon"):rpc.index("void RpcClient::send")]
+    require('send("wallpaper.stop"' not in disconnect,
+            "desconectar la UI no debe detener wallpapers del escritorio")
+
+
+def verify_ui_daemon_lifecycle_contract():
+    rpc = (REPO / "src/ui/rpc_client.cpp").read_text(encoding="utf-8")
+    qml = (REPO / "src/ui/qml/Main.qml").read_text(encoding="utf-8")
+    manager = (REPO / "src/renderers/renderer_manager.cpp").read_text(encoding="utf-8")
+
+    require('QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation)' in rpc and
+            'anispaper.sock' in rpc and
+            '"/run/user"' not in rpc,
+            "anis-paper-ui no resuelve exactamente $XDG_RUNTIME_DIR/anispaper.sock")
+    require("reconnect_.setInterval(1500)" in rpc and
+            "connectDaemon" in rpc,
+            "anis-paper-ui no reintenta la conexión con el daemon")
+    require('"jsonrpc", "2.0"' in rpc and
+            'object.contains("error")' in rpc,
+            "anis-paper-ui acepta una respuesta JSON-RPC malformada")
+    require(qml.count("client.stopSelected()") == 1 and
+            "UI_PREVIEW_OUTPUT" not in qml and
+            "UI_PREVIEW_OUTPUT" not in rpc,
+            "el cierre de la UI todavía detiene un renderer del daemon")
+    require('ANISPAPER_GAMING_MODE' in manager and
+            'isAnisPaperUiProcess' in manager and
+            'anis-paper-ui' in manager and
+            'anis-paper' in manager,
+            "Gaming Mode no excluye ni registra procesos propios de la UI")
+    x11_detector = (REPO / "third_party/linux-wallpaperengine/src/WallpaperEngine/Render/Drivers/Detectors/X11FullScreenDetector.cpp").read_text(encoding="utf-8")
+    require('Window parentWindow = 0;' in x11_detector,
+            "X11 fullscreen detector puede comparar un parentWindow no inicializado")
+    apply = rpc[rpc.index("void RpcClient::applySelected"):rpc.index("void RpcClient::stopSelected")]
+    require("setOnline(" not in apply,
+            "un error de apply cambia erróneamente el estado de conexión del daemon")
 
 
 def require(condition, message):
@@ -204,6 +226,7 @@ def write_fixture(root):
 def main():
     verify_ui_dp2_payload()
     verify_preview_throttle_does_not_gate_apply()
+    verify_ui_daemon_lifecycle_contract()
     require(DAEMON and DAEMON.is_file(), "usage: f4_integration.py daemon")
     with tempfile.TemporaryDirectory(prefix="anispaper-f4-") as temp:
         root = pathlib.Path(temp)

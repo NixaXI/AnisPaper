@@ -32,6 +32,7 @@ class VideoRenderer final : public Renderer {
   QString rendererName() const override;
   bool isRunning() const override;
   double frameRate() const override;
+  void applyPlayback(int fps, double volume) override;
 
  private:
   static void *getProcAddress(void *context, const char *name);
@@ -57,4 +58,5 @@ class VideoRenderer final : public Renderer {
   qint64 fpsEpochMs_ = 0;
   double fps_ = 0.0;
   bool sourceRateConfigured_ = false;
+  int nativeFps_ = 60;
 };

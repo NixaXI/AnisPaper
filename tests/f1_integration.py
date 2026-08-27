@@ -126,7 +126,7 @@ try:
  r.send({"jsonrpc":"2.0","id":"str","method":"settings.get"},True);r.send({"jsonrpc":"2.0","id":7,"method":"settings.get"})
  assert {r.line()["id"],r.line()["id"]}=={"str",7}
  assert r.call({"jsonrpc":"2.0","id":None,"method":"settings.get"})["id"] is None
- assert r.call({"jsonrpc":"2.0","id":1,"method":"settings.get"})["result"]["fpsCap"]==30
+ assert r.call({"jsonrpc":"2.0","id":1,"method":"settings.get"})["result"]["fpsCap"]==60
  r.call({"jsonrpc":"2.0","method":"settings.get"});assert r.quiet()
  r.send({"jsonrpc":"1.0"}); invalid=r.line();assert invalid["id"] is None and invalid["error"]["code"]==-32600
  for bad_id in (True,{},[]):

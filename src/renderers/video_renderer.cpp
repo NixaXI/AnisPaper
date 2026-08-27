@@ -102,7 +102,12 @@ bool VideoRenderer::start(QString *error) {
   };
   int result = setOption("vo", "libmpv");
   if (result >= 0) result = setOption("terminal", "no");
-  if (result >= 0) result = setOption("audio", "no");
+  // mpv 0.41 accepts "auto" (not "yes") for this option.  Auto keeps the
+  // audio stream in the same player and falls back cleanly when a file has no
+  // audio track or the session has no sink.
+  if (result >= 0) result = setOption("audio", "auto");
+  if (result >= 0) result = setOption("audio-client-name", "AnisPaper");
+  if (result >= 0) result = setOption("mute", spec_.volume <= 0.0 ? "yes" : "no");
   if (result >= 0) result = setOption("hwdec", "no");
   if (result >= 0) result = setOption("keep-open", "yes");
   if (result >= 0) result = mpv_initialize(mpv_);
@@ -146,6 +151,7 @@ bool VideoRenderer::start(QString *error) {
     mpv_set_property_string(mpv_, "volume", volume.constData());
     mpv_set_property_string(mpv_, "speed", speed.constData());
     mpv_set_property_string(mpv_, "loop-file", spec_.loop ? "inf" : "no");
+    mpv_set_property_string(mpv_, "mute", spec_.volume <= 0.0 ? "yes" : "no");
   }
   context_->doneCurrent();
   if (result < 0) {
@@ -220,6 +226,19 @@ QString VideoRenderer::rendererName() const { return QStringLiteral("video"); }
 bool VideoRenderer::isRunning() const { return running_; }
 
 double VideoRenderer::frameRate() const { return fps_; }
+
+void VideoRenderer::applyPlayback(int fps, double volume) {
+  Renderer::applyPlayback(fps, volume);
+  if (mpv_) {
+    const QByteArray value = QByteArray::number(spec_.volume * 100.0, 'f', 1);
+    mpv_set_property_string(mpv_, "volume", value.constData());
+    mpv_set_property_string(mpv_, "mute", spec_.volume <= 0.0 ? "yes" : "no");
+  }
+  if (running_ && !paused_) {
+    const int effective = sourceRateConfigured_ ? qMin(spec_.fps, nativeFps_) : spec_.fps;
+    frameTimer_.start(qMax(1, 1000 / qBound(1, effective, 60)));
+  }
+}
 
 void *VideoRenderer::getProcAddress(void *context, const char *name) {
   auto *glContext = static_cast<QOpenGLContext *>(context);
@@ -362,17 +381,22 @@ void VideoRenderer::pumpEvents() {
     if (!event || event->event_id == MPV_EVENT_NONE) {
       break;
     }
-    if (event->event_id == MPV_EVENT_FILE_LOADED && !sourceRateConfigured_) {
-      double sourceFps = 0.0;
-      if (mpv_get_property(mpv_, "container-fps", MPV_FORMAT_DOUBLE,
-                           &sourceFps) >= 0 &&
-          std::isfinite(sourceFps) && sourceFps >= 1.0 && sourceFps <= 240.0) {
-        sourceRateConfigured_ = true;
-        const int requested = qBound(1, spec_.fps, 60);
-        const int native = qBound(1, qRound(sourceFps), 60);
-        const int effective = qMin(requested, native);
-        if (effective != requested) {
-          frameTimer_.start(qMax(1, qRound(1000.0 / effective)));
+    if (event->event_id == MPV_EVENT_FILE_LOADED) {
+      const QByteArray volume = QByteArray::number(spec_.volume * 100.0, 'f', 1);
+      mpv_set_property_string(mpv_, "volume", volume.constData());
+      mpv_set_property_string(mpv_, "mute", spec_.volume <= 0.0 ? "yes" : "no");
+      if (!sourceRateConfigured_) {
+        double sourceFps = 0.0;
+        if (mpv_get_property(mpv_, "container-fps", MPV_FORMAT_DOUBLE,
+                             &sourceFps) >= 0 &&
+            std::isfinite(sourceFps) && sourceFps >= 1.0 && sourceFps <= 240.0) {
+          sourceRateConfigured_ = true;
+          nativeFps_ = qBound(1, qRound(sourceFps), 60);
+          const int requested = qBound(1, spec_.fps, 60);
+          const int effective = qMin(requested, nativeFps_);
+          if (effective != requested) {
+            frameTimer_.start(qMax(1, qRound(1000.0 / effective)));
+          }
         }
       }
     }

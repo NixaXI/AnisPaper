@@ -38,6 +38,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <time.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -48,7 +49,58 @@
 namespace {
 int g_shutdownPipeWrite = -1;
 
-void daemonSignalHandler(int) {
+void appendSignalText(char *buffer, size_t *length, size_t capacity,
+                      const char *text) {
+  while (*text != '\0' && *length < capacity) {
+    buffer[(*length)++] = *text++;
+  }
+}
+
+void appendSignalUnsigned(char *buffer, size_t *length, size_t capacity,
+                          unsigned long long value) {
+  char digits[32];
+  size_t count = 0;
+  do {
+    digits[count++] = static_cast<char>('0' + (value % 10));
+    value /= 10;
+  } while (value != 0 && count < sizeof(digits));
+  while (count > 0 && *length < capacity) {
+    buffer[(*length)++] = digits[--count];
+  }
+}
+
+void daemonSignalHandler(int signalNumber, siginfo_t *signalInfo, void *) {
+  // This handler deliberately uses only async-signal-safe operations.  The
+  // pipe still wakes Qt for the normal, orderly shutdown path; stderr keeps
+  // the sender evidence even if shutdown races with teardown.
+  char buffer[256];
+  size_t length = 0;
+  appendSignalText(buffer, &length, sizeof(buffer),
+                   "ANISPAPER_DAEMON_SIGNAL signal=");
+  appendSignalUnsigned(buffer, &length, sizeof(buffer),
+                       static_cast<unsigned long long>(signalNumber));
+  struct timespec timestamp {};
+  if (::clock_gettime(CLOCK_REALTIME, &timestamp) == 0) {
+    appendSignalText(buffer, &length, sizeof(buffer), " timestamp=");
+    appendSignalUnsigned(buffer, &length, sizeof(buffer),
+                         static_cast<unsigned long long>(timestamp.tv_sec));
+    appendSignalText(buffer, &length, sizeof(buffer), ".");
+    appendSignalUnsigned(buffer, &length, sizeof(buffer),
+                         static_cast<unsigned long long>(timestamp.tv_nsec));
+  }
+  appendSignalText(buffer, &length, sizeof(buffer), " pid=");
+  appendSignalUnsigned(buffer, &length, sizeof(buffer),
+                       static_cast<unsigned long long>(::getpid()));
+  appendSignalText(buffer, &length, sizeof(buffer), " sender_pid=");
+  appendSignalUnsigned(
+      buffer, &length, sizeof(buffer),
+      static_cast<unsigned long long>(signalInfo ? signalInfo->si_pid : 0));
+  appendSignalText(buffer, &length, sizeof(buffer), " sender_uid=");
+  appendSignalUnsigned(
+      buffer, &length, sizeof(buffer),
+      static_cast<unsigned long long>(signalInfo ? signalInfo->si_uid : 0));
+  appendSignalText(buffer, &length, sizeof(buffer), "\n");
+  (void)::write(STDERR_FILENO, buffer, length);
   if (g_shutdownPipeWrite >= 0) {
     const char byte = 1;
     (void)::write(g_shutdownPipeWrite, &byte, sizeof(byte));
@@ -102,7 +154,7 @@ QString hashId(const QString &prefix, const QString &s) { return prefix+QString:
 struct Settings {
   QStringList customFolders;
   QStringList favorites;
-  int fpsCap=30;
+  int fpsCap=60;
   double defaultVolume=1.;
   int retryQuota=3;
   QString wallpaperScaleMode=QStringLiteral("cover");
@@ -1131,6 +1183,8 @@ class Daemon : public QObject {
       settings_ = next;
       settings_.corrupt = false;
       renderers_->setGamingMode(settings_.gamingMode);
+      renderers_->setPlaybackOptions(qBound(1, settings_.fpsCap, 60),
+                                     settings_.defaultVolume);
       reply(asJson(settings_));
       return;
     }
@@ -1461,9 +1515,22 @@ class Daemon : public QObject {
         return;
       }
       const auto envCmd = qEnvironmentVariable("ANISPAPER_STEAMCMD");
-      const QString steamcmd = !envCmd.isEmpty()
+      QString steamcmd = !envCmd.isEmpty()
           ? envCmd
           : QStandardPaths::findExecutable(QStringLiteral("steamcmd"));
+      if (steamcmd.isEmpty()) {
+        const QString home = QDir::homePath();
+        const QStringList candidates{
+            home + "/.local/share/anispaper/steamcmd/steamcmd.sh",
+            home + "/.steam/steamcmd/steamcmd.sh",
+            home + "/.local/share/Steam/steamcmd/steamcmd.sh"};
+        for (const auto &candidate : candidates) {
+          if (QFileInfo::exists(candidate) && QFileInfo(candidate).isExecutable()) {
+            steamcmd = candidate;
+            break;
+          }
+        }
+      }
       if (steamcmd.isEmpty()) {
         fail(-32001, "steamcmd no está instalado (yay -S steamcmd)");
         return;
@@ -1540,7 +1607,8 @@ int main(int argc, char **argv) {
     return 1;
   }
   struct sigaction shutdownAction {};
-  shutdownAction.sa_handler = daemonSignalHandler;
+  shutdownAction.sa_sigaction = daemonSignalHandler;
+  shutdownAction.sa_flags = SA_SIGINFO;
   sigemptyset(&shutdownAction.sa_mask);
   sigaction(SIGTERM, &shutdownAction, nullptr);
   sigaction(SIGINT, &shutdownAction, nullptr);

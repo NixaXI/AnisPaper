@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <exception>
 #include <iterator>
 #include <optional>
 #include <sstream>
@@ -624,11 +625,17 @@ void CImage::setup () {
 
     const auto& debug = this->getScene ().getContext ().getApp ().getContext ().settings.render.debug;
 
+    auto tryAddPass = [this] (auto&&... args) {
+	try {
+	    this->m_passes.push_back (new CPass (std::forward<decltype (args)> (args)...));
+	} catch (const std::exception& e) {
+	    sLog.error ("AnisPaper: skipping failed pass on object ", this->m_image.id, ": ", e.what ());
+	}
+    };
+
     // copy pass to the composite layer
     for (const auto& cur : this->getImage ().model->material->passes) {
-	this->m_passes.push_back (
-	    new CPass (*this, std::make_shared<FBOProvider> (this), *cur, std::nullopt, std::nullopt, std::nullopt)
-	);
+	tryAddPass (*this, std::make_shared<FBOProvider> (this), *cur, std::nullopt, std::nullopt, std::nullopt);
     }
 
     // prepare the passes list
@@ -695,9 +702,9 @@ void CImage::setup () {
 		    const auto& config = *this->m_virtualPassess.emplace_back (std::move (virtualPass));
 
 		    // build a pass for a copy shader
-		    this->m_passes.push_back (new CPass (
+		    tryAddPass (
 			*this, fboProvider, config, std::nullopt, std::nullopt, (*curEffect)->target.value ()
-		    ));
+		    );
 		} else {
 		    for (auto& pass : (*curEffect)->material.value ()->passes) {
 			const auto override = curOverride != endOverride
@@ -707,9 +714,7 @@ void CImage::setup () {
 			    ? *(*curEffect)->target
 			    : std::optional<std::reference_wrapper<std::string>> (std::nullopt);
 
-			this->m_passes.push_back (
-			    new CPass (*this, fboProvider, *pass, override, (*curEffect)->binds, target)
-			);
+			tryAddPass (*this, fboProvider, *pass, override, (*curEffect)->binds, target);
 		    }
 
 		    if (curOverride != endOverride) {
@@ -739,11 +744,11 @@ void CImage::setup () {
 	    );
 	    this->m_materials.compatibilityOverrides.emplace_back (std::move (tintOverride));
 
-	    this->m_passes.push_back (new CPass (
+	    tryAddPass (
 		*this, std::make_shared<FBOProvider> (this),
 		**this->m_materials.compatibilityMaterials.back ()->passes.begin (),
 		*this->m_materials.compatibilityOverrides.back (), std::nullopt, std::nullopt
-	    ));
+	    );
 	}
     }
 
@@ -760,10 +765,10 @@ void CImage::setup () {
             .textures = {},
         });
 
-	this->m_passes.push_back (new CPass (
+	tryAddPass (
 	    *this, std::make_shared<FBOProvider> (this), **this->m_materials.colorBlending.material->passes.begin (),
 	    *this->m_materials.colorBlending.override, std::nullopt, std::nullopt
-	));
+	);
     }
 
     // if there's more than one pass the blendmode has to be moved from the beginning to the end

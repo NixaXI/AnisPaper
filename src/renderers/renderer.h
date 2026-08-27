@@ -4,6 +4,7 @@
 #include <QJsonObject>
 #include <QObject>
 #include <QString>
+#include <QtGlobal>
 
 // The renderer contract is deliberately small.  It is shared by the isolated
 // video/web workers and by the in-daemon static fallback.  All calls are made
@@ -19,7 +20,7 @@ struct RendererSpec {
   // child, which mounts the whole directory, including scene.pkg).
   QString root;
   QJsonObject properties;
-  int fps = 30;
+  int fps = 60;
   double volume = 1.0;
   double speed = 1.0;
   bool loop = true;
@@ -49,6 +50,12 @@ class Renderer : public QObject {
   virtual bool isFallback() const { return false; }
   virtual qint64 processId() const { return 0; }
   virtual double frameRate() const { return 0.0; }
+  // Live master mix from settings.fpsCap / settings.defaultVolume.  Isolated
+  // children receive a configure command; in-process renderers apply immediately.
+  virtual void applyPlayback(int fps, double volume) {
+    spec_.fps = qBound(1, fps, 60);
+    spec_.volume = qBound(0.0, volume, 1.0);
+  }
 
   const RendererSpec &spec() const { return spec_; }
 

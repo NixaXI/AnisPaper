@@ -1,4 +1,5 @@
 #include "CPass.h"
+#include <exception>
 #include <sstream>
 #include <utility>
 
@@ -40,6 +41,26 @@ std::string textureSizeLabel (const std::shared_ptr<const TextureProvider>& text
 
     return std::to_string (texture->getRealWidth ()) + "x" + std::to_string (texture->getRealHeight ());
 }
+
+const char* kPassthroughVS = R"(#version 330
+in vec3 a_Position;
+in vec2 a_TexCoord;
+out vec2 v_TexCoord;
+uniform mat4 g_ModelViewProjectionMatrix;
+void main() {
+    v_TexCoord = a_TexCoord;
+    gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);
+}
+)";
+
+const char* kPassthroughFS = R"(#version 330
+in vec2 v_TexCoord;
+uniform sampler2D g_Texture0;
+out vec4 out_FragColor;
+void main() {
+    out_FragColor = texture(g_Texture0, v_TexCoord);
+}
+)";
 }
 
 CPass::CPass (
@@ -112,7 +133,8 @@ std::shared_ptr<const CFBO> CPass::resolveFBO (const std::string& name) const {
     auto fbo = this->m_fboProvider->find (name);
 
     if (fbo == nullptr) {
-	sLog.exception ("Tried to resolve and FBO without any luck: ", name);
+	    sLog.error ("Tried to resolve an FBO without any luck: ", name);
+	    return nullptr;
     }
 
     return fbo;
@@ -556,40 +578,33 @@ void CPass::setGeometryCallback (
 }
 
 GLuint CPass::compileShader (const char* shader, GLuint type) {
-    // reserve shaders in OpenGL
     const GLuint shaderID = glCreateShader (type);
-
     glShaderSource (shaderID, 1, &shader, nullptr);
     glCompileShader (shaderID);
 
     GLint result = GL_FALSE;
     int infoLogLength = 0;
-
-    // ensure the vertex shader was correctly compiled
     glGetShaderiv (shaderID, GL_COMPILE_STATUS, &result);
     glGetShaderiv (shaderID, GL_INFO_LOG_LENGTH, &infoLogLength);
 
     if (infoLogLength > 0) {
 	const auto logBuffer = new char[infoLogLength + 1];
-	// ensure logBuffer ends with a \0
 	memset (logBuffer, 0, infoLogLength + 1);
-	// get information about the error
 	glGetShaderInfoLog (shaderID, infoLogLength, nullptr, logBuffer);
-	// throw an exception about the issue
 	std::stringstream buffer;
 	buffer << logBuffer << std::endl << "Compiled source code:" << std::endl << shader;
-	// free the buffer
 	delete[] logBuffer;
-
 	if (result == GL_FALSE) {
-	    // shader compilation failed completely, throw an exception
-	    sLog.exception (buffer.str ());
+	    sLog.error (buffer.str ());
 	} else {
-	    // some warning was emitted, log the error and keep chuging along
 	    sLog.error (buffer.str ());
 	}
     }
 
+    if (result == GL_FALSE) {
+	glDeleteShader (shaderID);
+	return 0;
+    }
     return shaderID;
 }
 
@@ -621,46 +636,77 @@ void CPass::setupShaders () {
 	passTextures.insert_or_assign (index, texture);
     }
 
-    this->m_shader = new Render::Shaders::Shader (
-	this->m_renderable.getAssetLocator (), shaderName, this->m_combos, this->m_override.combos, passTextures,
-	this->m_override.textures, this->m_override.constants
-    );
+    this->m_programID = 0;
+    GLuint vertexShaderID = 0;
+    GLuint fragmentShaderID = 0;
+    try {
+	this->m_shader = new Render::Shaders::Shader (
+	    this->m_renderable.getAssetLocator (), shaderName, this->m_combos, this->m_override.combos, passTextures,
+	    this->m_override.textures, this->m_override.constants
+	);
 
-    const auto [vertex, fragment]
-	= Shaders::GLSLContext::get ().toGlsl (this->m_shader->vertex (), this->m_shader->fragment ());
+	const std::string vertexSrc = this->m_shader->vertex ();
+	const std::string fragmentSrc = this->m_shader->fragment ();
+	auto [vertex, fragment] = Shaders::GLSLContext::get ().toGlsl (vertexSrc, fragmentSrc);
+	if (vertex.empty () || fragment.empty ()) {
+	    sLog.error ("AnisPaper: empty SPIR-V GLSL, compiling original shader units");
+	    vertex = vertexSrc;
+	    fragment = fragmentSrc;
+	}
 
-    // compile the shaders
-    const GLuint vertexShaderID = compileShader (vertex.c_str (), GL_VERTEX_SHADER);
-    const GLuint fragmentShaderID = compileShader (fragment.c_str (), GL_FRAGMENT_SHADER);
-    // create the final program
-    this->m_programID = glCreateProgram ();
-    // link the shaders together
-    glAttachShader (this->m_programID, vertexShaderID);
-    glAttachShader (this->m_programID, fragmentShaderID);
-    glLinkProgram (this->m_programID);
-    // check that the shader was properly linked
-    GLint result = GL_FALSE;
-    int infoLogLength = 0;
+	vertexShaderID = compileShader (vertex.c_str (), GL_VERTEX_SHADER);
+	fragmentShaderID = compileShader (fragment.c_str (), GL_FRAGMENT_SHADER);
+    } catch (const std::exception& e) {
+	sLog.error ("AnisPaper: shader setup failed: ", e.what ());
+    }
+    if (vertexShaderID == 0 || fragmentShaderID == 0) {
+	if (vertexShaderID != 0) glDeleteShader (vertexShaderID);
+	if (fragmentShaderID != 0) glDeleteShader (fragmentShaderID);
+	sLog.error ("AnisPaper: shader compile failed, using unlit passthrough");
+	vertexShaderID = compileShader (kPassthroughVS, GL_VERTEX_SHADER);
+	fragmentShaderID = compileShader (kPassthroughFS, GL_FRAGMENT_SHADER);
+    }
+    if (vertexShaderID == 0 || fragmentShaderID == 0) {
+	sLog.exception ("AnisPaper: passthrough shader failed");
+    }
 
-    glGetProgramiv (this->m_programID, GL_LINK_STATUS, &result);
-    glGetProgramiv (this->m_programID, GL_INFO_LOG_LENGTH, &infoLogLength);
-
-    if (infoLogLength > 0) {
-	const auto logBuffer = new char[infoLogLength + 1];
-	// ensure logBuffer ends with a \0
-	memset (logBuffer, 0, infoLogLength + 1);
-	// get information about the error
-	glGetProgramInfoLog (this->m_programID, infoLogLength, nullptr, logBuffer);
-	// throw an exception about the issue
-	const std::string message = logBuffer;
-	// free the buffer
-	delete[] logBuffer;
-	if (result == GL_FALSE) {
-	    // shader compilation failed completely, throw an exception
-	    sLog.exception (message);
-	} else {
-	    // some warning was emitted, log the error and keep chuging along
+    auto linkProgram = [&] (GLuint vs, GLuint fs) -> bool {
+	if (this->m_programID != 0) {
+	    glDeleteProgram (this->m_programID);
+	}
+	this->m_programID = glCreateProgram ();
+	glAttachShader (this->m_programID, vs);
+	glAttachShader (this->m_programID, fs);
+	glLinkProgram (this->m_programID);
+	GLint result = GL_FALSE;
+	int infoLogLength = 0;
+	glGetProgramiv (this->m_programID, GL_LINK_STATUS, &result);
+	glGetProgramiv (this->m_programID, GL_INFO_LOG_LENGTH, &infoLogLength);
+	if (infoLogLength > 0) {
+	    const auto logBuffer = new char[infoLogLength + 1];
+	    memset (logBuffer, 0, infoLogLength + 1);
+	    glGetProgramInfoLog (this->m_programID, infoLogLength, nullptr, logBuffer);
+	    const std::string message = logBuffer;
+	    delete[] logBuffer;
+	    if (result == GL_FALSE) {
+		sLog.error ("AnisPaper: shader link failed: ", message);
+		return false;
+	    }
 	    sLog.error (message);
+	}
+	return result != GL_FALSE;
+    };
+
+    if (!linkProgram (vertexShaderID, fragmentShaderID)) {
+	glDetachShader (this->m_programID, vertexShaderID);
+	glDetachShader (this->m_programID, fragmentShaderID);
+	glDeleteShader (vertexShaderID);
+	glDeleteShader (fragmentShaderID);
+	sLog.error ("AnisPaper: shader link failed, using unlit passthrough");
+	vertexShaderID = compileShader (kPassthroughVS, GL_VERTEX_SHADER);
+	fragmentShaderID = compileShader (kPassthroughFS, GL_FRAGMENT_SHADER);
+	if (vertexShaderID == 0 || fragmentShaderID == 0 || !linkProgram (vertexShaderID, fragmentShaderID)) {
+	    sLog.exception ("AnisPaper: passthrough shader failed");
 	}
     }
 
@@ -670,21 +716,17 @@ void CPass::setupShaders () {
     glObjectLabel (GL_SHADER, fragmentShaderID, -1, (shaderName + ".frag").c_str ());
 #endif /* DEBUG */
 
-    // after being liked shaders can be dettached and deleted
     glDetachShader (this->m_programID, vertexShaderID);
     glDetachShader (this->m_programID, fragmentShaderID);
 
     glDeleteShader (vertexShaderID);
     glDeleteShader (fragmentShaderID);
 
-    // first setup the default values, these will be overwritten by future values
-    this->setupShaderVariables ();
-    // setup uniforms
+    if (this->m_shader != nullptr) {
+	this->setupShaderVariables ();
+    }
     this->setupUniforms ();
-    // setup attributes too
     this->setupAttributes ();
-    // get information from the program, like uniforms, etc
-    // support three textures for now
     this->g_Texture0Rotation = glGetUniformLocation (this->m_programID, "g_Texture0Rotation");
     this->g_Texture0Translation = glGetUniformLocation (this->m_programID, "g_Texture0Translation");
 }
@@ -695,6 +737,7 @@ void CPass::setupAttributes () {
 }
 
 void CPass::setupTextureUniforms () {
+    if (this->m_shader != nullptr) {
     // first set default textures extracted from the shader
     // vertex shader doesn't seem to have texture info
     // but for now just set first vertex's textures
@@ -731,6 +774,7 @@ void CPass::setupTextureUniforms () {
 	} catch (std::runtime_error& ex) {
 	    sLog.error ("Cannot resolve texture ", textureName, " for fragment shader ", ex.what ());
 	}
+    }
     }
 
     for (const auto& [index, textureName] : this->m_pass.textures) {

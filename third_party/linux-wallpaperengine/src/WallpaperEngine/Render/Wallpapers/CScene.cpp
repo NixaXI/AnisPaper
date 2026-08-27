@@ -11,6 +11,7 @@
 #include "WallpaperEngine/Data/Model/Wallpaper.h"
 #include "WallpaperEngine/Data/Parsers/ObjectParser.h"
 
+#include <exception>
 #include <ranges>
 
 extern float g_Time;
@@ -92,7 +93,11 @@ CScene::CScene (
 
     // create all objects based off their dependencies
     for (const auto& object : scene->objects) {
-	this->createObject (*object);
+	try {
+	    this->createObject (*object);
+	} catch (const std::exception& e) {
+	    sLog.error ("AnisPaper: skipping object ", object->id, ": ", e.what ());
+	}
     }
 
     // copy over objects by render order
@@ -159,10 +164,16 @@ CScene::CScene (
 
     // create image for bloom passes
     if (scene->camera.bloom.enabled->value->getBool ()) {
-	this->m_bloomObjectData = ObjectParser::parse (bloom, scene->project);
-	this->m_bloomObject = this->createObject (*this->m_bloomObjectData);
-
-	this->m_objectsByRenderOrder.push_back (this->m_bloomObject);
+	try {
+	    this->m_bloomObjectData = ObjectParser::parse (bloom, scene->project);
+	    this->m_bloomObject = this->createObject (*this->m_bloomObjectData);
+	    if (this->m_bloomObject != nullptr) {
+		this->m_objectsByRenderOrder.push_back (this->m_bloomObject);
+	    }
+	} catch (const std::exception& e) {
+	    sLog.error ("AnisPaper: bloom setup failed: ", e.what ());
+	    this->m_bloomObject = nullptr;
+	}
     }
 }
 
@@ -210,10 +221,10 @@ Render::CObject* CScene::createObject (const Object& object) {
 	});
 
 	if (dep == this->getScene ().objects.end ()) {
-	    sLog.exception ("Cannot find parent ", parentId, " for object ", object.id);
+	    sLog.error ("Cannot find parent ", parentId, " for object ", object.id, "; continuing without parent");
+	} else {
+	    this->createObject (**dep);
 	}
-
-	this->createObject (**dep);
     }
 
     renderObject = this->dispatchObjectType (object);
@@ -228,24 +239,30 @@ Render::CObject* CScene::createObject (const Object& object) {
 Render::CObject* CScene::dispatchObjectType (const Object& object) {
     Render::CObject* renderObject = nullptr;
 
-    if (object.is<Image> ()) {
-	renderObject = new Objects::CImage (*this, *object.as<Image> ());
-    } else if (object.is<Sound> ()) {
-	renderObject = new Objects::CSound (*this, *object.as<Sound> ());
-    } else if (object.is<Text> ()) {
-	renderObject = new Objects::CText (*this, *object.as<Text> ());
-    } else if (object.is<Particle> ()) {
-	const auto& particleData = *object.as<Particle> ();
+    try {
+	if (object.is<Image> ()) {
+	    renderObject = new Objects::CImage (*this, *object.as<Image> ());
+	} else if (object.is<Sound> ()) {
+	    renderObject = new Objects::CSound (*this, *object.as<Sound> ());
+	} else if (object.is<Text> ()) {
+	    renderObject = new Objects::CText (*this, *object.as<Text> ());
+	} else if (object.is<Particle> ()) {
+	    const auto& particleData = *object.as<Particle> ();
 
-	if (this->getContext ().getApp ().getContext ().settings.general.disableParticles == true) {
-	    sLog.debug ("Ignoring particle system (disabled in settings): ", particleData.name);
-	    return nullptr;
+	    if (this->getContext ().getApp ().getContext ().settings.general.disableParticles == true) {
+		sLog.debug ("Ignoring particle system (disabled in settings): ", particleData.name);
+		return nullptr;
+	    }
+
+	    renderObject = new Objects::CParticle (*this, particleData);
+	} else {
+	    sLog.error ("Unknown object type, creating placeholder, empty object: ", object.id);
+	    renderObject = new CObject (*this, object);
 	}
-
-	renderObject = new Objects::CParticle (*this, particleData);
-    } else {
-	sLog.error ("Unknown object type, creating placeholder, empty object: ", object.id);
-	renderObject = new CObject (*this, object);
+    } catch (const std::exception& e) {
+	sLog.error ("Failed to create object ", object.id, ": ", e.what ());
+	delete renderObject;
+	return nullptr;
     }
 
     try {

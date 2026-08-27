@@ -306,7 +306,8 @@ void ShaderUnit::preprocessIncludes () {
     }
 
     if (!includesAdded) {
-	sLog.exception ("Could not find where to place includes for shader unit ", this->m_file);
+	sLog.error ("Could not find where to place includes for shader unit ", this->m_file, "; prepending");
+	this->m_preprocessed.insert (0, this->m_includes + '\n');
     }
 }
 
@@ -371,7 +372,14 @@ std::string ShaderUnit::generateLightingV1 () const {
 	   "vec3 PerformLighting_V1(vec3 worldPos, vec3 albedo, vec3 normal, vec3 viewDir,\n"
 	   "    vec3 specularTint, vec3 baseReflectance, float roughness, float metallic)\n"
 	   "{\n"
-	   "    return vec3(0.0);\n"
+	   "    vec3 N = normalize(normal);\n"
+	   "    vec3 V = normalize(viewDir);\n"
+	   "    vec3 L = normalize(vec3(0.28, 0.72, 0.48));\n"
+	   "    float ndotl = max(dot(N, L), 0.0);\n"
+	   "    float ndotv = max(dot(N, V), 0.0);\n"
+	   "    vec3 diffuse = albedo * (0.42 + 0.58 * ndotl);\n"
+	   "    vec3 spec = specularTint * pow(ndotv, mix(8.0, 2.0, clamp(roughness, 0.0, 1.0)));\n"
+	   "    return mix(diffuse + spec * 0.25, albedo, clamp(metallic, 0.0, 1.0) * 0.35);\n"
 	   "}\n"
 	   "// end of generated module LightingV1\n";
 }
@@ -392,6 +400,14 @@ std::string ShaderUnit::applyLinkedVaryingCompatibility (std::string source) con
 
 	const std::regex vertexVec2Decl ("\\bvarying\\s+vec2\\s+" + name + "\\s*;");
 	if (!std::regex_search (source, vertexVec2Decl)) {
+	    continue;
+	}
+
+	// genericimage4 gates v_TexCoord as vec4 (#if PBRMASKS) or vec2 (#else).
+	// Matching the inactive vec4 line promoted the live vec2 path to vec4 and
+	// produced `vec4 * vec2` compile failures — gray/missing scene objects.
+	const std::regex fragmentVec2Decl ("\\bvarying\\s+vec2\\s+" + name + "\\s*;");
+	if (std::regex_search (linked, fragmentVec2Decl)) {
 	    continue;
 	}
 

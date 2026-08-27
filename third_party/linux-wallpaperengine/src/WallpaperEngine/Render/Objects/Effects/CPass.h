@@ -202,7 +202,7 @@ private:
     std::shared_ptr<const TextureProvider> m_previousInput = nullptr;
     glm::vec4 m_texture0Resolution = {};
 
-    GLuint m_programID;
+    GLuint m_programID = 0;
 
     // shader variables used temporary
     GLint g_Texture0Rotation;

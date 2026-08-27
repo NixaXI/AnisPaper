@@ -4,6 +4,7 @@
 
 #include <QDateTime>
 #include <QFileInfo>
+#include <QWebEnginePage>
 #include <QUrl>
 #include <QWebEngineSettings>
 #include <QWebEngineView>
@@ -32,6 +33,7 @@ bool WebRenderer::start(QString *error) {
   view_->setAttribute(Qt::WA_DontShowOnScreen, true);
   auto *settings = view_->settings();
   settings->setAttribute(QWebEngineSettings::JavascriptEnabled, true);
+  settings->setAttribute(QWebEngineSettings::PlaybackRequiresUserGesture, false);
   settings->setAttribute(QWebEngineSettings::LocalContentCanAccessRemoteUrls,
                          true);
   settings->setAttribute(QWebEngineSettings::LocalContentCanAccessFileUrls,
@@ -41,10 +43,18 @@ bool WebRenderer::start(QString *error) {
             loaded_ = ok;
             if (!ok) {
               activateFallback(QStringLiteral("web load failed"));
+              return;
+            }
+            if (view_ && view_->page()) {
+              view_->page()->setAudioMuted(spec_.volume <= 0.0);
+              view_->page()->runJavaScript(
+                  QStringLiteral("document.querySelectorAll('audio,video').forEach(e=>{e.volume=%1;e.play().catch(()=>{})})")
+                      .arg(QString::number(spec_.volume, 'f', 3)));
             }
           });
   view_->load(QUrl::fromLocalFile(QFileInfo(spec_.file).absoluteFilePath()));
   view_->show();
+  view_->page()->setAudioMuted(spec_.volume <= 0.0);
 
   running_ = true;
   paused_ = false;
@@ -80,6 +90,10 @@ void WebRenderer::pause() {
   }
   paused_ = true;
   frameTimer_.stop();
+  if (view_ && view_->page()) {
+    view_->page()->runJavaScript(
+        QStringLiteral("document.querySelectorAll('audio,video').forEach(e=>e.pause())"));
+  }
 }
 
 void WebRenderer::resume() {
@@ -87,6 +101,12 @@ void WebRenderer::resume() {
     return;
   }
   paused_ = false;
+  if (view_ && view_->page() && spec_.volume > 0.0) {
+    view_->page()->setAudioMuted(false);
+    view_->page()->runJavaScript(
+        QStringLiteral("document.querySelectorAll('audio,video').forEach(e=>{e.volume=%1;e.play().catch(()=>{})})")
+            .arg(QString::number(spec_.volume, 'f', 3)));
+  }
   frameTimer_.start(qMax(1, 1000 / qBound(1, spec_.fps, 60)));
 }
 
@@ -99,6 +119,22 @@ bool WebRenderer::isRunning() const { return running_; }
 bool WebRenderer::isFallback() const { return fallback_; }
 
 double WebRenderer::frameRate() const { return fps_; }
+
+void WebRenderer::applyPlayback(int fps, double volume) {
+  Renderer::applyPlayback(fps, volume);
+  if (!view_ || !view_->page()) {
+    return;
+  }
+  view_->page()->setAudioMuted(spec_.volume <= 0.0);
+  if (spec_.volume > 0.0) {
+    view_->page()->runJavaScript(
+        QStringLiteral("document.querySelectorAll('audio,video').forEach(e=>{e.volume=%1;e.muted=false})")
+            .arg(QString::number(spec_.volume, 'f', 3)));
+  }
+  if (running_ && !paused_) {
+    frameTimer_.start(qMax(1, 1000 / qBound(1, spec_.fps, 60)));
+  }
+}
 
 void WebRenderer::captureFrame() {
   if (!running_ || paused_ || !view_) {

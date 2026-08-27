@@ -4,6 +4,7 @@
 #include "renderer.h"
 
 #include <QElapsedTimer>
+#include <QJsonObject>
 #include <QProcess>
 
 #include <functional>
@@ -28,6 +29,7 @@ class IsolatedRenderer final : public Renderer {
   bool isFallback() const override;
   qint64 processId() const override;
   double frameRate() const override;
+  void applyPlayback(int fps, double volume) override;
 
   // Set by the owner before start().  The view is mapped child memory and is
   // valid only until this synchronous callback returns.
@@ -44,6 +46,7 @@ class IsolatedRenderer final : public Renderer {
 
  private:
   void sendCommand(const QString &command);
+  void sendJson(const QJsonObject &message);
   void readFrames();
   void parseLine(const QByteArray &line);
   void reportFatal(const QString &reason);

@@ -9,6 +9,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QSet>
 
 #include <cmath>
@@ -17,6 +18,26 @@
 namespace {
 constexpr int kPlasmaCallTimeoutMs = 5000;
 constexpr auto kPlasmaPlugin = "org.anispaper.frame";
+
+QProcessEnvironment waylandHelperEnvironment() {
+  QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+  // The user systemd manager may not import the graphical session variables.
+  // This helper uses QGuiApplication and the raw Wayland registry, so do not
+  // let an inherited DISPLAY make Qt select the XCB backend at boot.
+  environment.insert(QStringLiteral("QT_QPA_PLATFORM"), QStringLiteral("wayland"));
+  if (environment.value(QStringLiteral("WAYLAND_DISPLAY")).isEmpty()) {
+    const QString runtime = environment.value(QStringLiteral("XDG_RUNTIME_DIR"));
+    if (!runtime.isEmpty()) {
+      const QDir runtimeDirectory(runtime);
+      const QStringList sockets = runtimeDirectory.entryList(QStringList{QStringLiteral("wayland-*")},
+                                                              QDir::System | QDir::Readable, QDir::Name);
+      if (!sockets.isEmpty()) {
+        environment.insert(QStringLiteral("WAYLAND_DISPLAY"), sockets.constFirst());
+      }
+    }
+  }
+  return environment;
+}
 
 QString dbusError(const QString &operation, const QDBusMessage &reply) {
   return QStringLiteral("Plasma %1 failed: %2").arg(operation, reply.errorMessage());
@@ -87,6 +108,8 @@ class HelperRunner final : public PlasmaOutputMapRunner {
                            QStringLiteral("/anispaper-plasma-output-map");
     QProcess process;
     process.setProgram(helper);
+    const QProcessEnvironment environment = waylandHelperEnvironment();
+    process.setProcessEnvironment(environment);
     process.setProcessChannelMode(QProcess::SeparateChannels);
     process.start();
     if (!process.waitForStarted(kPlasmaCallTimeoutMs)) {

@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -118,6 +119,7 @@ struct StageProfiler {
 StageProfiler g_profiler;
 
 std::atomic<bool> g_paused { false };
+std::atomic<int> g_targetFps { 60 };
 WallpaperApplication* g_app = nullptr;
 
 void emitJson (const ::std::string& line) {
@@ -586,6 +588,34 @@ void stdinCommandLoop (ApplicationContext* context) {
             g_paused = false;
         } else if (pending.find ("\"stop\"") != ::std::string::npos) {
             context->state.general.keepRunning = false;
+        } else if (pending.find ("\"configure\"") != ::std::string::npos) {
+            const auto extractNumber = [&pending] (const char* key) -> double {
+                const auto pos = pending.find (key);
+                if (pos == ::std::string::npos) return -1.0;
+                const auto colon = pending.find (':', pos);
+                if (colon == ::std::string::npos) return -1.0;
+                try {
+                    return ::std::stod (pending.substr (colon + 1));
+                } catch (...) {
+                    return -1.0;
+                }
+            };
+            const double fpsValue = extractNumber ("\"fps\"");
+            const double volumeValue = extractNumber ("\"volume\"");
+            if (fpsValue >= 1.0) {
+                const int fps = ::std::clamp (static_cast<int> (::std::lround (fpsValue)), 1, 60);
+                g_targetFps = fps;
+                context->settings.render.maximumFPS = fps;
+            }
+            if (volumeValue >= 0.0) {
+                const int volume = volumeValue <= 1.0
+                    ? ::std::clamp (static_cast<int> (::std::lround (volumeValue * 128.0)), 0, 128)
+                    : ::std::clamp (static_cast<int> (::std::lround (volumeValue)), 0, 128);
+                context->settings.audio.volume = volume;
+                context->settings.audio.enabled = volume > 0;
+                context->state.audio.volume = volume;
+                context->state.audio.enabled = volume > 0;
+            }
         }
     }
 }
@@ -621,7 +651,7 @@ int main (int argc, char* argv []) {
 
     // Parse our own child protocol arguments first.
     ::std::filesystem::path projectDir;
-    int width = 1920, height = 1080, fps = 30;
+    int width = 1920, height = 1080, fps = 60, volume = 0;
     ::std::string scaling = "fill";
     for (int i = 1; i < argc; ++i) {
         const ::std::string arg = argv [i];
@@ -633,6 +663,8 @@ int main (int argc, char* argv []) {
             height = ::std::stoi (argv [++i]);
         } else if (arg == "--fps" && i + 1 < argc) {
             fps = ::std::stoi (argv [++i]);
+        } else if (arg == "--volume" && i + 1 < argc) {
+            volume = ::std::stoi (argv [++i]);
         } else if (arg == "--scaling" && i + 1 < argc) {
             scaling = argv [++i];
         }
@@ -655,11 +687,15 @@ int main (int argc, char* argv []) {
 
     // Build the upstream engine context from a synthesized command line.
     fps = ::std::clamp (fps, 1, 60);
+    volume = ::std::clamp (volume, 0, 128);
+    g_targetFps = fps;
     ::std::vector<::std::string> engineArgs {
         "anis-paper-scene-engine",
-        "--silent",
         "--fps",
         ::std::to_string (fps),
+        "--volume",
+        ::std::to_string (volume),
+        "--noautomute",
         "--window",
         "0x0x" + ::std::to_string (width) + "x" + ::std::to_string (height),
         "--scaling",
@@ -668,22 +704,24 @@ int main (int argc, char* argv []) {
         assetsDir->string (),
         projectDir.string (),
     };
-    // Fullscreen pause stays enabled by default: when a fullscreen app (game)
-    // covers the screen the daemon already stops polling, and the engine will
-    // additionally stop rendering altogether.  ANISPAPER_SCENE_NO_FULLSCREEN_PAUSE=1
-    // restores the debug-only behavior of rendering regardless.
+    // The daemon owns evidence-based Gaming Mode.  A generic fullscreen
+    // geometry match (for example an IDE) is not enough to pause a wallpaper;
+    // the child receives --no-fullscreen-pause through the environment below.
     if (::getenv ("ANISPAPER_SCENE_NO_FULLSCREEN_PAUSE")) {
-        engineArgs.insert (engineArgs.begin () + 2, "--no-fullscreen-pause");
+        // Keep option/value pairs intact: inserting between --fps and its
+        // value makes argparse treat the numeric FPS as the wallpaper ID.
+        engineArgs.insert (engineArgs.end () - 1, "--no-fullscreen-pause");
     }
     // Debug-only: ANISPAPER_SCENE_SCREENSHOT=<file.png> asks the upstream
     // engine to write the frame through its own CPU screenshot path.  That
     // path is independent of our GPU capture, so it is the ground truth used
     // to validate crop/scale/orientation of the SHM frames.
     if (const char* shot = ::getenv ("ANISPAPER_SCENE_SCREENSHOT"); shot && *shot) {
-        engineArgs.insert (engineArgs.begin () + 2, "--screenshot");
-        engineArgs.insert (engineArgs.begin () + 3, shot);
-        engineArgs.insert (engineArgs.begin () + 4, "--screenshot-delay");
-        engineArgs.insert (engineArgs.begin () + 5, "5");
+        const auto projectIndex = engineArgs.size () - 1;
+        engineArgs.insert (engineArgs.begin () + projectIndex, "--screenshot");
+        engineArgs.insert (engineArgs.begin () + projectIndex + 1, shot);
+        engineArgs.insert (engineArgs.begin () + projectIndex + 2, "--screenshot-delay");
+        engineArgs.insert (engineArgs.begin () + projectIndex + 3, "5");
     }
 
     ::std::vector<char*> engineArgv;
@@ -749,6 +787,16 @@ int main (int argc, char* argv []) {
             if (g_paused) {
                 return;
             }
+            const int targetFps = ::std::clamp (g_targetFps.load (), 1, 60);
+            static auto lastCapture = StageProfiler::Clock::time_point {};
+            const auto now = StageProfiler::Clock::now ();
+            if (lastCapture.time_since_epoch ().count () != 0) {
+                const auto minInterval = ::std::chrono::milliseconds (1000 / targetFps);
+                if (now - lastCapture < minInterval) {
+                    return;
+                }
+            }
+            lastCapture = now;
             // 1) GPU crop/flip/scale + asynchronous readPixels submit.
             const auto t0 = StageProfiler::Clock::now ();
             captureFrame (application, width, height, ++submitSeq);

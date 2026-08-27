@@ -8,6 +8,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
+#include <QDebug>
 #include <QTimer>
 
 #include <algorithm>
@@ -17,6 +18,65 @@
 
 namespace {
 constexpr int kCrashThreshold = 3;
+
+QString environmentValue(const QByteArray &environment, const QByteArray &key) {
+  const QByteArray prefix = key + '=';
+  for (const QByteArray &entry : environment.split('\0')) {
+    if (entry.startsWith(prefix)) return QString::fromLocal8Bit(entry.sliced(prefix.size()));
+  }
+  return {};
+}
+
+QString parentPid(const QString &pid) {
+  QFile status(QStringLiteral("/proc/") + pid + QStringLiteral("/status"));
+  if (!status.open(QIODevice::ReadOnly)) return QStringLiteral("unknown");
+  const QList<QByteArray> lines = status.readAll().split('\n');
+  for (const QByteArray &line : lines) {
+    if (line.startsWith("PPid:")) return QString::fromLatin1(line.mid(5).trimmed());
+  }
+  return QStringLiteral("unknown");
+}
+
+bool isAnisPaperUiProcess(const QString &command, const QString &executable) {
+  const QString normalized = (command + QLatin1Char('\n') + executable).toLower();
+  const QString executableName = QFileInfo(executable).fileName().toLower();
+  // These are control-plane processes.  They must never be treated as a Steam
+  // game merely because they inherit SteamAppId from a terminal or launcher.
+  return normalized.contains(QStringLiteral("anispaper")) ||
+         normalized.contains(QStringLiteral("anis-paper")) ||
+         executableName == QStringLiteral("anis-paper-ui") ||
+         executableName == QStringLiteral("anis-paperd");
+}
+
+bool isNonGameHelper(const QString &command, const QString &executable) {
+  const QString executableName = QFileInfo(executable).fileName().toLower();
+  const QString normalized = (command + QLatin1Char('\n') + executable).toLower();
+  if (executableName.startsWith(QLatin1String("python")) ||
+      executableName == QLatin1String("node") ||
+      executableName == QLatin1String("nodejs") ||
+      executableName == QLatin1String("zsh") ||
+      executableName == QLatin1String("bash") ||
+      executableName == QLatin1String("sh") ||
+      executableName == QLatin1String("cursor") ||
+      executableName == QLatin1String("electron")) {
+    return true;
+  }
+  return normalized.contains(QLatin1String("pressure-vessel")) ||
+         normalized.contains(QLatin1String("srt-bwrap")) ||
+         normalized.contains(QLatin1String("pv-adverb")) ||
+         normalized.contains(QLatin1String("steamwebhelper")) ||
+         normalized.contains(QLatin1String("steam-runtime")) ||
+         normalized.contains(QLatin1String("wallpaper_engine"));
+}
+
+bool validSteamAppId(const QString &id) {
+  if (id.isEmpty() || id == QLatin1String("0") || id == QLatin1String("none")) {
+    return false;
+  }
+  bool ok = false;
+  const int value = id.toInt(&ok);
+  return ok && value > 0;
+}
 
 QJsonValue propertyValue(const QJsonObject &properties, const QString &name) {
   QJsonValue value = properties.value(name);
@@ -244,7 +304,19 @@ void RendererManager::setGamingMode(const QString &mode) {
   refreshGamingState();
 }
 
-bool RendererManager::steamGameRunning() {
+void RendererManager::setPlaybackOptions(int fps, double volume) {
+  const int boundedFps = qBound(1, fps, 60);
+  const double boundedVolume = qBound(0.0, volume, 1.0);
+  for (Entry *entry : std::as_const(byOutput_)) {
+    if (!entry || !entry->renderer) continue;
+    entry->spec.fps = boundedFps;
+    entry->spec.volume = boundedVolume;
+    entry->renderer->applyPlayback(boundedFps, boundedVolume);
+  }
+}
+
+bool RendererManager::steamGameRunning(QString *reason) {
+  if (reason) reason->clear();
   QDir proc(QStringLiteral("/proc"));
   const QString self = QString::number(static_cast<qint64>(::getpid()));
   const QStringList pids = proc.entryList({QStringLiteral("[0-9]*")},
@@ -256,29 +328,75 @@ bool RendererManager::steamGameRunning() {
     QFile envFile(QStringLiteral("/proc/") + pid + QStringLiteral("/environ"));
     if (!cmdFile.open(QIODevice::ReadOnly)) continue;
     const QByteArray cmd = cmdFile.read(256 * 1024);
+    const QString command = QString::fromLocal8Bit(cmd).replace(QChar::Null, QLatin1Char(' '));
+    const QString executable = QFileInfo(QStringLiteral("/proc/") + pid + QStringLiteral("/exe"))
+                                   .symLinkTarget();
+    if (isAnisPaperUiProcess(command, executable)) continue;
+    if (isNonGameHelper(command, executable)) continue;
     if (cmd.contains("steamwebhelper") || cmd.contains("steam-runtime")) continue;
-    bool steamApp = false;
+    QByteArray env;
     if (envFile.open(QIODevice::ReadOnly)) {
-      const QByteArray env = envFile.read(256 * 1024);
-      steamApp = env.contains("STEAM_COMPAT_APP_ID=") ||
-                 env.contains("SteamAppId=") || env.contains("SteamGameId=");
+      env = envFile.read(256 * 1024);
     }
-    if (steamApp) return true;
-    const QString command = QString::fromLocal8Bit(cmd);
+    const QString steamAppId = !environmentValue(env, "STEAM_COMPAT_APP_ID").isEmpty()
+                                   ? environmentValue(env, "STEAM_COMPAT_APP_ID")
+                                   : (!environmentValue(env, "SteamAppId").isEmpty()
+                                          ? environmentValue(env, "SteamAppId")
+                                          : environmentValue(env, "SteamGameId"));
+    const QString lowerCommand = command.toLower();
+    const bool knownGameRuntime =
+        lowerCommand.contains(QStringLiteral("/steamapps/common/")) ||
+        lowerCommand.contains(QStringLiteral("/compatdata/")) ||
+        lowerCommand.contains(QStringLiteral("pressure-vessel")) ||
+        lowerCommand.contains(QStringLiteral("/proton")) ||
+        lowerCommand.contains(QStringLiteral("proton-")) ||
+        lowerCommand.contains(QStringLiteral("/wine")) ||
+        lowerCommand.contains(QStringLiteral("wine64")) ||
+        lowerCommand.contains(QStringLiteral("gamescope"));
+    const auto detected = [&](const QString &why) {
+      if (reason) {
+        *reason = QStringLiteral("pid=%1 ppid=%2 exe=%3 SteamAppId=%4 reason=%5")
+                      .arg(pid, parentPid(pid), executable.isEmpty() ? QStringLiteral("unknown") : executable,
+                           steamAppId.isEmpty() ? QStringLiteral("none") : steamAppId, why);
+      }
+      return true;
+    };
+    // A bare inherited SteamAppId is not sufficient: IDEs and terminals can
+    // inherit launcher variables without being a game window.  Require a
+    // recognizable Steam/Proton runtime or game path as corroboration.
+    if (!steamAppId.isEmpty() && validSteamAppId(steamAppId) && knownGameRuntime) {
+      return detected(QStringLiteral("SteamAppId + game runtime evidence"));
+    }
     if (command.contains(QStringLiteral("/steamapps/common/")) &&
-        !command.contains(QStringLiteral("steam.exe"), Qt::CaseInsensitive)) return true;
+        !command.contains(QStringLiteral("steam.exe"), Qt::CaseInsensitive)) {
+      return detected(QStringLiteral("Steam library executable"));
+    }
     if ((command.contains(QStringLiteral("wine"), Qt::CaseInsensitive) ||
          command.contains(QStringLiteral("pressure-vessel"), Qt::CaseInsensitive)) &&
-        command.contains(QStringLiteral("/compatdata/"))) return true;
+        command.contains(QStringLiteral("/compatdata/"))) {
+      return detected(QStringLiteral("Proton compatdata process"));
+    }
   }
+  if (reason) *reason = QStringLiteral("no qualifying Steam/Proton process");
   return false;
 }
 
 void RendererManager::refreshGamingState() {
-  const bool active = gamingMode_ == QStringLiteral("on") ||
-                      (gamingMode_ == QStringLiteral("auto") && steamGameRunning());
+  QString reason;
+  bool active = false;
+  if (gamingMode_ == QStringLiteral("on")) {
+    active = true;
+    reason = QStringLiteral("settings gamingMode=on");
+  } else if (gamingMode_ == QStringLiteral("auto")) {
+    active = steamGameRunning(&reason);
+  } else {
+    reason = QStringLiteral("settings gamingMode=off");
+  }
   if (active == gamingActive_) return;
   gamingActive_ = active;
+  qInfo().noquote() << "ANISPAPER_GAMING_MODE"
+                    << (gamingActive_ ? "activated" : "deactivated")
+                    << "mode=" << gamingMode_ << reason;
   for (Entry *entry : std::as_const(byOutput_)) {
     if (!entry || !entry->renderer) continue;
     if (gamingActive_) {

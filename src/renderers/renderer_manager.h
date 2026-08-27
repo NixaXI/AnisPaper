@@ -11,7 +11,7 @@
 class QTimer;
 
 struct RendererOptions {
-  int fps = 30;
+  int fps = 60;
   double defaultVolume = 1.0;
   QString scaleMode = QStringLiteral("cover");
 };
@@ -34,6 +34,7 @@ class RendererManager final : public QObject {
   QString wallpaperId(const QString &output) const;
   QJsonObject status() const;
   void setGamingMode(const QString &mode);
+  void setPlaybackOptions(int fps, double volume);
 
  signals:
   void wallpaperActive(const QJsonObject &event);
@@ -80,7 +81,7 @@ class RendererManager final : public QObject {
   static int stableWindowMs();
   static int startupWindowMs(const RendererSpec &spec, bool sceneNativeUnsupported);
   static int scaledDelayMs(int seconds);
-  static bool steamGameRunning();
+  static bool steamGameRunning(QString *reason = nullptr);
   void refreshGamingState();
   QHash<QString, Entry *> byOutput_;
   QHash<QString, QSet<QString>> outputsByWallpaperId_;
