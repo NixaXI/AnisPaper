@@ -1,0 +1,9 @@
+<RCC>
+  <qresource prefix="/ui">
+    <file alias="index.html">web/index.html</file>
+    <file alias="bridge.js">web/bridge.js</file>
+  </qresource>
+  <qresource prefix="/">
+    <file alias="anis-star.png">../../assets/anis-star.png</file>
+  </qresource>
+</RCC>

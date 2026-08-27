@@ -51,7 +51,7 @@
 
 Instead of embedding the expensive renderer directly inside `plasmashell`, AnisPaper splits the work into separate components:
 
-- ★ an Electron control UI
+- ★ a native Qt Quick control UI (`anis-paper-ui`, no Electron)
 - ★ a native daemon: `anis-paperd`
 - ★ isolated renderers
 - ★ a dedicated Wallpaper Engine Scene process
@@ -114,7 +114,7 @@ This is still an experimental project, not a polished consumer release.
 
 ```mermaid
 flowchart LR
-    UI["✦ Electron UI"] -->|"JSON-RPC"| D["anis-paperd"]
+    UI["✦ anis-paper-ui (Qt Quick)"] -->|"JSON-RPC"| D["anis-paperd"]
     D --> C["Catalog + settings"]
     D --> M["Monitor mapping"]
     D --> R["Isolated renderer manager"]
@@ -193,10 +193,8 @@ The native project currently uses:
 
 ### UI dependencies
 
-For the Electron control UI:
-
-- Node.js
-- npm
+The control room is `anis-paper-ui` (Qt Quick). It is built with the rest of the
+project; no Node.js or Electron is required to use AnisPaper.
 
 ---
 
@@ -215,8 +213,7 @@ sudo pacman -S --needed \
   mpv libjpeg-turbo \
   mesa glew freeglut \
   sdl2 lz4 ffmpeg libpulse freetype2 dbus \
-  libx11 libxrandr libxinerama libxcursor libxi libxxf86vm \
-  nodejs npm
+  libx11 libxrandr libxinerama libxcursor libxi libxxf86vm
 ```
 
 Package names may differ on other distributions.
@@ -323,30 +320,16 @@ journalctl --user -u anispaper.service -f
 
 ---
 
-## ★ 8. Build and run the Electron UI
+## ★ 8. Run the Qt control room
 
-Open a second terminal:
-
-```bash
-cd AnisPaper/ui
-npm ci
-npm run dev
-```
-
-For a production-style local build:
+After install, launch **AnisPaper** from the app menu or:
 
 ```bash
-npm run build
-npm run start
+anis-paper-ui
 ```
 
-### Note for NTFS / FUSE / filesystems without executable bits
-
-Some mounted filesystems do not preserve executable permissions correctly.
-
-If `npm ci` fails with an `EACCES` error while trying to run `esbuild`, move the project to a native Linux filesystem or use a workaround that installs dependencies without running native post-install scripts and executes required binaries from a temporary executable location.
-
-This area is still being improved.
+The binary talks JSON-RPC to `anis-paperd` over `$XDG_RUNTIME_DIR/anispaper.sock`.
+It does not start Electron, Chromium, Node or Vite.
 
 ---
 
@@ -580,23 +563,13 @@ There are tests around areas including:
 
 ## ✦ UI development
 
-```bash
-cd ui
-npm ci
-npm run dev
-```
-
-Type checking:
+The control room is the Qt Quick binary. After a normal CMake install:
 
 ```bash
-npm run typecheck
+anis-paper-ui
 ```
 
-Production build:
-
-```bash
-npm run build
-```
+The `ui/` directory is a retired Electron client. `npm run start` / `npm run dev` exit with an error on purpose.
 
 ---
 

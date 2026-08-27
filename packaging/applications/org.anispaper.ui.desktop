@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=AnisPaper
+Comment=Live wallpapers for KDE Plasma — Anis Starlight control room
+Exec=anis-paper-ui
+TryExec=anis-paper-ui
+Icon=anis-star
+Terminal=false
+Categories=Utility;Qt;KDE;Graphics;
+StartupNotify=true
+StartupWMClass=anis-paper-ui
+DBusActivatable=false

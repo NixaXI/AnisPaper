@@ -45,11 +45,12 @@ target_include_directories(anispaper-layer-shell-probe PRIVATE ${PROBE_GENERATED
 target_link_libraries(anispaper-layer-shell-probe PRIVATE PkgConfig::WAYLAND_CLIENT)
 target_compile_options(anispaper-layer-shell-probe PRIVATE -Wall -Wextra -Wpedantic)
 
-find_package(Qt6 6.2 REQUIRED COMPONENTS Core Network Gui OpenGL Widgets WebEngineCore WebEngineWidgets Quick Qml DBus)
+find_package(Qt6 6.2 REQUIRED COMPONENTS Core Network Gui OpenGL Widgets WebEngineCore WebEngineWidgets WebChannel Quick Qml QuickControls2 DBus)
 find_package(KF6Auth 6.0 REQUIRED)
 pkg_check_modules(MPV REQUIRED IMPORTED_TARGET mpv)
 pkg_check_modules(JPEG REQUIRED IMPORTED_TARGET libjpeg)
 set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
 
 # Offscreen Wallpaper Engine scene renderer child (vendored engine).  The
 # child runs in its own process so scene parsing/shaders/GL never touch the
@@ -144,6 +145,27 @@ target_link_libraries(anispaper-plasma-output-map PRIVATE Qt6::Core Qt6::Gui Qt6
 target_compile_options(anispaper-plasma-output-map PRIVATE -Wall -Wextra -Wpedantic)
 add_dependencies(anis-paperd anispaper-plasma-output-map)
 
+add_executable(anis-paper-ui
+    src/ui/main.cpp
+    src/ui/rpc_client.h
+    src/ui/rpc_client.cpp
+    src/ui/catalog_model.h
+    src/ui/catalog_model.cpp
+    src/ui/anispaper-ui.qrc
+)
+target_compile_features(anis-paper-ui PRIVATE cxx_std_20)
+target_link_libraries(anis-paper-ui PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Network
+    Qt6::Widgets
+    Qt6::WebEngineWidgets
+    Qt6::WebChannel
+)
+target_compile_options(anis-paper-ui PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_definitions(anis-paper-ui PRIVATE
+    ANISPAPER_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
 # This QML extension registers image://anispaper on the Plasma wallpaper
 # engine. Keep its build-tree layout identical to the installed local module
 # so the dummy QQuickView test exercises the real dynamic plugin.
@@ -171,13 +193,16 @@ set_target_properties(anispaperframeprovider PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${ANISPAPER_FRAME_QML_BUILD_DIR}
 )
 
-install(TARGETS anis-paperd anispaper-plasma-output-map RUNTIME DESTINATION bin)
+install(TARGETS anis-paperd anispaper-plasma-output-map anis-paper-ui RUNTIME DESTINATION bin)
+install(FILES packaging/applications/org.anispaper.ui.desktop DESTINATION share/applications)
+install(FILES packaging/plasma/AnisStarlight.colors DESTINATION share/color-schemes)
 if(ANISPAPER_ENABLE_SCENE_ENGINE)
   install(TARGETS anis-paper-scene-engine RUNTIME DESTINATION bin)
 endif()
 install(PROGRAMS tools/sddm/anispaper-sddm-install
         DESTINATION libexec/anispaper)
 install(FILES assets/anispaper/fallback.jpg DESTINATION share/anispaper)
+install(FILES assets/anis-star.png DESTINATION share/icons/hicolor/256x256/apps)
 install(TARGETS anispaperframeprovider
     LIBRARY DESTINATION share/plasma/wallpapers/org.anispaper.frame/contents/ui/org/anispaper/frame
     RUNTIME DESTINATION share/plasma/wallpapers/org.anispaper.frame/contents/ui/org/anispaper/frame)
@@ -203,6 +228,9 @@ if(BUILD_TESTING)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_test(NAME sddm_helper
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/sddm_helper_test.py)
+  add_test(NAME plasma_output_map_env_contract
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/plasma_output_map_env_contract.py
+              ${CMAKE_CURRENT_SOURCE_DIR})
   add_executable(anispaper-plasma-login-manager-test
       tests/plasma_login_manager_test.cpp
       src/daemon/plasma_login_manager.h
@@ -308,4 +336,7 @@ if(BUILD_TESTING)
   set_tests_properties(f3_integration PROPERTIES SKIP_RETURN_CODE 77)
   add_test(NAME f4_integration COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/f4_integration.py $<TARGET_FILE:anis-paperd>)
   set_tests_properties(f4_integration PROPERTIES SKIP_RETURN_CODE 77)
+  add_test(NAME audio_fps_contract COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/audio_fps_contract.py)
+  add_test(NAME game_pause_contract COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/game_pause_contract.py)
+  add_test(NAME signal_shutdown_contract COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/signal_shutdown_contract.py)
 endif()

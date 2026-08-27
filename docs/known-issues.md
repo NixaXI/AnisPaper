@@ -208,3 +208,107 @@
   procesadas, 310 JPEG de preview guardados (los dos casos sin captura fueron
   INVALID sin frame), 304 PASS, 5 CRASH y 3 INVALID; todos los outputs
   sintéticos desaparecieron y no quedaron PIDs/SHM residuales.
+
+## P0.6 — lifecycle UI/daemon — corregido 2026-08-15
+
+- **Bug A, causa**: `DaemonClient` convertía socket ausente, rechazo, cierre,
+  timeout, respuesta inválida y cancelación en errores indistinguibles; además,
+  una llamada de lectura podía quedar esperando una conexión rota durante el
+  reconnect. Ahora el socket se resuelve una sola vez como
+  `$XDG_RUNTIME_DIR/anispaper.sock`, se registra una vez en `anis-paper-ui`, las
+  clases de transporte se conservan y sólo lecturas idempotentes reintentan una
+  vez. Las respuestas entrantes también exigen `jsonrpc: "2.0"`, un `id`
+  válido y separación estricta entre notificaciones y respuestas; lo demás se
+  clasifica como error de protocolo.
+- **Bug B, causa**: el teardown de React enviaba `wallpaper.stop` para el
+  output de preview. Eso mutaba el daemon desde el ciclo de vida de la UI.
+  La UI Qt no envía `wallpaper.stop` al desconectarse; sólo la acción explícita
+  Detener lo hace.
+- **Gaming Mode**: la detección `/proc` excluye explícitamente AnisPaper y
+  `anis-paper-ui` antes de evaluar Steam/Proton. Al cambiar de
+  estado registra PID, PPID, ejecutable, SteamAppId y motivo.
+- **Evidencia real**: con UI abierta y cerrada, DP-2 y HDMI-A-1 conservaron los
+  mismos PIDs, `frameNo` siguió avanzando, `gamingPaused=false`,
+  `hasFrame=true`, `watchdog.count=0` y `safeMode=false`; la UI reabrió contra
+  el mismo socket sin reiniciar los renderers. No se reinició Plasma ni KWin.
+- La sala de control nativa es `anis-paper-ui`. Electron quedó retirado.
+
+## P0.7 — audio/FPS y Gaming Mode — corregido 2026-08-15
+
+- **Audio**: libmpv ya no fuerza `audio=no`; usa `audio=auto` en el mismo
+  renderer-child y conserva `RendererSpec.volume`. Las escenas dejan de pasar
+  `--silent` y propagan `--volume` (0–128). Web aplica mute/volumen y pausa o
+  reanuda los elementos `audio`/`video` mediante la página QtWebEngine.
+- **Bug de argumentos**: al quitar `--silent`, insertar
+  `--no-fullscreen-pause` en la posición fija `+2` rompía el par `--fps 30` y
+  convertía `30` en el ID del wallpaper. La inserción ahora ocurre justo antes
+  del argumento posicional del proyecto; una prueba directa con una scene real
+  ya no produce `content 30`/`content 60` y sólo queda bloqueada por el DBus del
+  sandbox.
+- **FPS**: el default del daemon, renderer, engine y UI es 60. El pacing de
+  vídeo sigue limitado por el FPS real del contenedor, por lo que una fuente
+  30 FPS sigue produciendo ~30 y no se inventan frames.
+- **Fullscreen**: el engine de escenas recibe
+  `ANISPAPER_SCENE_NO_FULLSCREEN_PAUSE=1`; una ventana IDE/fullscreen genérica
+  ya no pausa la escena. La pausa queda delegada a Gaming Mode, que exige
+  evidencia de runtime Steam/Proton (`steamapps/common`, `compatdata`, Proton,
+  Wine, gamescope o pressure-vessel) y no acepta sólo `SteamAppId` heredado.
+- **Prueba controlada**: un proceso efímero con argv
+  `/tmp/steamapps/common/fake-game` y `SteamAppId=999999` activó
+  `gaming.active=true` y `gamingPaused=true` en ambos outputs; al salir,
+  `gaming.active=false`, `gamingPaused=false`, `hasFrame=true` y no se
+  recrearon procesos.
+- **Servicio/socket**: la ausencia observada fue un cierre limpio con
+  `status=0`/SIGTERM en el journal, por lo que `Restart=on-failure` no debía
+  relanzarlo. Tras un reinicio explícito del servicio, el socket 0600 quedó
+  presente y estable durante las comprobaciones; no se cambió la política de
+  systemd sin evidencia de un crash.
+- **Estado real tras deploy**: catálogo 545, DP-2 scene ~58.9 FPS, HDMI-A-1
+  vídeo ~29.9 FPS, `crashes=0`, `safeMode=false`, `watch_failures=0`, ambos
+  `hasFrame=true`. PipeWire mostró streams activos de
+  `anis-paper-scene-engine` y `mpv`.
+- **CPU comparable (top, 12 muestras de 1 s)**: daemon 75.6%, vídeo 33.8%,
+  scene 5.8%, plasmashell 17.0%, KWin 0.1% en el estado actual. La línea base
+  de la sesión problemática era aproximadamente daemon 98%, vídeo 67%, scene
+  26% y plasmashell 230%; la comparación depende de la escena/output activos,
+  pero no se observa el bloqueo de 230% en esta validación.
+- **Tests**: `audio_fps_contract.py`, `game_pause_contract.py` y CTest
+  completo pasaban 13/13 antes de añadir el contrato de señal; el cierre P0.8
+  final queda en 14/14. No se encontró ningún archivo de vídeo de captura
+  dentro del repositorio para conservar/eliminar; la captura adjunta del
+  usuario no está disponible como ruta local verificable.
+
+## P0.8 — cierre de estabilización — 2026-08-15
+
+- **SIGTERM**: las terminaciones observadas en el journal son cierres limpios
+  ordenados por `systemd[866]`; el reinicio controlado registró literalmente:
+  `ANISPAPER_DAEMON_SIGNAL signal=15 ... pid=2745364 sender_pid=866
+  sender_uid=1000`. El daemon ahora instala `SA_SIGINFO` y escribe timestamp,
+  PID propio, PID/UID emisor en stderr antes de despertar el pipe de shutdown.
+  No se cambió `Restart=on-failure`: un stop manual sigue siendo un stop
+  manual y el próximo cierre inesperado podrá atribuirse con la misma línea.
+
+- **Gaming Mode real**: no había SMITE 2 ni juego Proton activo durante la
+  validación; Steam estaba abierto sin juego. Por tanto, la transición real
+  SMITE/Alt-Tab/cierre queda explícitamente no probada. La prueba controlada
+  previa de evidencia Steam simulada sigue pasando; no se presenta como juego
+  real.
+
+- **CPU por escenario** (`top -b -n 8 -d 1`, 8 muestras, misma sesión):
+
+  | escenario | daemon | video child | scene child | plasmashell |
+  |---|---:|---:|---:|---:|
+  | scene + video | 90.6% | 39.7% | 15.4% | 55.6% |
+  | sólo scene | 7.8% | — | 12.1% | 32.6% |
+  | sólo video | 70.5% | 35.0% | — | 18.5% |
+  | ambos pausados | 0.0% | 0.1% | 3.1% | 0.4% |
+
+  El contraste atribuye el coste principal del daemon al camino video
+  `glReadPixels → JPEG/base64 → IPC → decode/bridge`; no se hizo un cambio
+  especulativo porque eliminarlo requiere una sustitución de transporte.
+
+- **Estado después de restaurar**: `gamingMode=auto`, ambos PIDs se
+  conservaron durante pause/resume (`DP-2=2766755`, `HDMI-A-1=2762587`),
+  `hasFrame=true`, `crashes=0`, `safeMode=false`, `watchdog.count=0`, socket
+  `/run/user/1000/anispaper.sock` presente. FPS: scene ~58.6, video 30. La
+  fuente de video confirma `r_frame_rate=30/1`, por lo que no se fuerza 60.
