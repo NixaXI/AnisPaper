@@ -72,3 +72,11 @@ tools/scene/captures/
 perf.data
 perf.data.old
 callgrind.out.*
+
+furina-panel
+.code-review-graph/
+.cursorrules
+
+# Local AI notes / agent plans — keep out of the public history
+AGENTS.md
+docs/superpowers/

@@ -110,6 +110,7 @@ export interface SteamInstallResult {
 
 export interface AnisPaperApi {
   rpc<T>(method: string, params?: JsonRecord): Promise<T>;
+  cancelPreview(output: string): void;
   chooseFolder(): Promise<string | null>;
   thumbnail(path: string): Promise<string>;
   savePreview(data: string, suggestedName: string): Promise<SavePreviewResult>;
