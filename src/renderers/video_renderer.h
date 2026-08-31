@@ -1,6 +1,7 @@
 #pragma once
 
 #include "renderer.h"
+#include "shm_frame_transport.h"
 
 #include <QByteArray>
 #include <QSize>
@@ -40,6 +41,11 @@ class VideoRenderer final : public Renderer {
   bool isRunning() const override;
   double frameRate() const override;
   void applyPlayback(int fps, double volume) override;
+  // Direct-publish hook: when the child protocol owns a ShmFrameTransport
+  // matching this renderer's geometry, readbacks land straight in the
+  // transport slot (PBO map -> slot memcpy, GL bottom-up rows flipped in the
+  // same pass) and the per-frame frame_ QImage copy disappears.
+  void setFrameTransport(ShmFrameTransport *transport);
 
  private:
   static void *getProcAddress(void *context, const char *name);
@@ -106,4 +112,6 @@ class VideoRenderer final : public Renderer {
   int freeCount_ = 0;
   bool asyncReadback_ = false;
   QSize readbackSize_;
+  // Non-owning direct-publish transport (see setFrameTransport).
+  ShmFrameTransport *frameTransport_ = nullptr;
 };

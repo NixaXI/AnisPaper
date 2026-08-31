@@ -7,6 +7,16 @@
 #include <QtGlobal>
 
 #include <cstddef>
+#include <ctime>
+
+namespace anispaper {
+inline quint64 monotonicNsHeader() {
+  timespec stamp{};
+  if (::clock_gettime(CLOCK_MONOTONIC, &stamp) != 0) return 0;
+  return static_cast<quint64>(stamp.tv_sec) * 1000000000ULL +
+         static_cast<quint64>(stamp.tv_nsec);
+}
+}  // namespace anispaper
 
 // Child-side (single writer) frame transport for the isolated video/web
 // renderer workers.  Wire ABI is identical to the scene engine transport
@@ -30,6 +40,34 @@ class ShmFrameTransport {
   // keeps the previous frame published) when the frame does not match the
   // transport geometry, letting the caller fall back to the JSON path.
   bool publish(const QImage &frame);
+
+  // Zero-copy publish path: hands the caller the raw next slot and only
+  // flips the publication sequence once `writer` returns true.  `writer`
+  // receives (slotDestination, slotStride) and must fill width x height
+  // RGBA pixels.  This exists for renderers that can land their readback
+  // directly in the final buffer (PBO map -> slot), skipping the transient
+  // per-frame QImage entirely.
+  template <typename Writer>
+  bool publishWith(Writer &&writer) {
+    if (!header_ || width_ <= 0 || height_ <= 0) return false;
+    const quint64 next = frameNo_ + 1;
+    uchar *slot = slotBase_ + static_cast<size_t>(next % kBuffers) * slotBytes_;
+    if (!writer(slot, static_cast<qsizetype>(stride_))) return false;
+    header_->timestampNs = anispaper::monotonicNsHeader();
+    __atomic_store_n(&header_->writeIndex, static_cast<quint32>(next % kBuffers),
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&header_->frameNo, next, __ATOMIC_RELEASE);
+    frameNo_ = next;
+    return true;
+  }
+
+  // Geometry the writer must produce (exposed for renderers that verify
+  // their output size against the transport before submitting).
+  int slotWidth() const { return width_; }
+  int slotHeight() const { return height_; }
+  bool matchesGeometry(int width, int height) const {
+    return mapping_ != nullptr && width == width_ && height == height_;
+  }
 
   QString name() const { return name_; }
   quint64 frameNo() const { return frameNo_; }

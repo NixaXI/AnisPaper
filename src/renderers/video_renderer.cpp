@@ -388,6 +388,10 @@ void VideoRenderer::submitAsyncReadback() {
   inflightCount_++;
 }
 
+void VideoRenderer::setFrameTransport(ShmFrameTransport *transport) {
+  frameTransport_ = transport;
+}
+
 bool VideoRenderer::consumeOldestReadback() {
   if (inflightCount_ == 0) {
     return false;
@@ -411,13 +415,27 @@ bool VideoRenderer::consumeOldestReadback() {
   const uchar *mapped = static_cast<const uchar *>(
       sync_.mapBufferRange(GL_PIXEL_PACK_BUFFER, 0, static_cast<qint64>(bytes),
                            GL_MAP_READ_BIT));
-  if (mapped && !frame_.isNull()) {
+  const int width = spec_.width;
+  const int height = spec_.height;
+  const size_t glRowBytes = static_cast<size_t>(width) * 4;
+  if (mapped && frameTransport_ && frameTransport_->isActive() &&
+      frameTransport_->matchesGeometry(width, height)) {
+    // Direct publish: the PBO copy lands straight in the transport slot,
+    // flipping GL's bottom-up rows in the same pass.  The transient
+    // per-frame frame_ QImage disappears from the hot path.
+    copied = frameTransport_->publishWith([&](uchar *slot, qsizetype slotStride) {
+      for (int row = 0; row < height; ++row) {
+        std::memcpy(slot + static_cast<qsizetype>(row) * slotStride,
+                    mapped + static_cast<size_t>(height - 1 - row) * glRowBytes,
+                    glRowBytes);
+      }
+      return true;
+    });
+  } else if (mapped && !frame_.isNull()) {
     // GL content is bottom-up.  Copying with reversed source rows lands the
     // frame top-down in one pass, replacing the separate flip loop.
-    const int height = frame_.height();
     uchar *destination = frame_.bits();
     const qsizetype rowBytes = frame_.bytesPerLine();
-    const size_t glRowBytes = static_cast<size_t>(spec_.width) * 4;
     for (int row = 0; row < height; ++row) {
       std::memcpy(destination + row * rowBytes,
                   mapped + static_cast<size_t>(height - 1 - row) * glRowBytes,

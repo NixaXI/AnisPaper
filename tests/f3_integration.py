@@ -152,10 +152,16 @@ def main():
         # The daemon's game detector scans system-wide processes, so a game
         # running on the host (gamingMode defaults to "auto") would pause the
         # test wallpaper and starve the frame-count assertions below.  Force
-        # the detector off for this sandboxed instance.
-        (config / "anispaper" ).mkdir()
+        # the detector off for this sandboxed instance.  The settings loader
+        # rejects files with missing required fields (customFolders etc.) as
+        # corrupt and falls back to defaults, so write the full valid shape.
+        (config / "anispaper").mkdir()
         (config / "anispaper" / "settings.json").write_text(
-            json.dumps({"gamingMode": "off"}), encoding="utf-8")
+            json.dumps({"customFolders": [], "favorites": [], "fpsCap": 60,
+                        "defaultVolume": 0, "retryQuota": 3,
+                        "gamingMode": "off",
+                        "wallpaper": {"scaleMode": "cover"}}),
+            encoding="utf-8")
         env = os.environ.copy()
         env.update({
             "XDG_RUNTIME_DIR": str(runtime),
