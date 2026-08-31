@@ -127,7 +127,16 @@ bool RendererManager::apply(const QJsonObject &item, const QString &output,
   }
   if (type != QStringLiteral("video") && type != QStringLiteral("web") &&
       type != QStringLiteral("scene")) {
-    if (error) *error = QStringLiteral("renderer unavailable");
+    // Named per type so the UI can explain the expected, non-fatal state
+    // instead of surfacing a generic repeated renderer-unavailable error.
+    if (error) {
+      *error = type == QStringLiteral("static") || type == QStringLiteral("unknown")
+                   ? QStringLiteral("renderer unavailable: static wallpapers are "
+                                    "catalog previews, not animated stages")
+                   : QStringLiteral("renderer unavailable: unsupported wallpaper "
+                                    "type '%1'")
+                         .arg(type);
+    }
     if (errorCode) *errorCode = -32001;
     return false;
   }

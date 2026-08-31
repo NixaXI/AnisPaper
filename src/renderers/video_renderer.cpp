@@ -1,5 +1,7 @@
 #include "video_renderer.h"
 
+#include "../common/gpu_vendor.h"
+
 #include <QDateTime>
 #include <QFileInfo>
 #include <QOffscreenSurface>
@@ -108,8 +110,27 @@ bool VideoRenderer::start(QString *error) {
   if (result >= 0) result = setOption("audio", "auto");
   if (result >= 0) result = setOption("audio-client-name", "AnisPaper");
   if (result >= 0) result = setOption("mute", spec_.volume <= 0.0 ? "yes" : "no");
-  if (result >= 0) result = setOption("hwdec", "no");
   if (result >= 0) result = setOption("keep-open", "yes");
+
+  // GPU decode offload.  The vendor probe picks the interop that matches the
+  // machine (VAAPI on Mesa, NVDEC on discrete NVIDIA); when the method is not
+  // available for a file, mpv silently falls back to software decoding, so a
+  // misdetected vendor can only cost speed, never playback.  ANISPAPER_VIDEO_HWDEC
+  // ("no", "vaapi", "nvdec", "auto-safe", ...) overrides the probe for testing.
+  const GpuVendor vendor = detectGpuVendor();
+  const QByteArray overrideValue = qgetenv("ANISPAPER_VIDEO_HWDEC").trimmed();
+  const QByteArray hwdecMethod = !overrideValue.isEmpty()
+                                     ? overrideValue
+                                     : recommendedVideoHwdec(vendor).toLatin1();
+  if (result >= 0) result = setOption("hwdec", hwdecMethod.constData());
+  if (result >= 0) result = setOption("hwdec-codecs", "all");
+  // The frame timer renders at the effective wallpaper fps (usually the
+  // 20 fps cap), while mpv's decoder otherwise runs at the file's native
+  // rate (60 for most workshop videos).  Letting the decoder skip frames
+  // the render context will never show cuts the vaapi-copy GPU->RAM
+  // download to the displayed rate instead of the native one.
+  if (result >= 0) result = setOption("framedrop", "decoder+vo");
+
   if (result >= 0) result = mpv_initialize(mpv_);
   if (result < 0) {
     context_->doneCurrent();
@@ -143,6 +164,14 @@ bool VideoRenderer::start(QString *error) {
                                          this);
 
   const QByteArray source = QFileInfo(spec_.file).absoluteFilePath().toUtf8();
+  // Frame-stepped playback for muted wallpapers: mpv stays paused and the
+  // frame timer drives advancement one frame-step at a time, so a 60 fps
+  // source under a 20 fps cap costs 20 decoder runs and 20 GPU->RAM vaapi
+  // copies per second instead of 60.  Audible wallpapers keep mpv's clock
+  // (audio needs continuous playback) and fall back to the render-on-update
+  // flow; applyPlayback flips the mode if volume changes at runtime.
+  frameStepped_ = spec_.volume <= 0.0;
+  if (result >= 0 && frameStepped_) result = setOption("pause", "yes");
   const char *load[] = {"loadfile", source.constData(), "replace", nullptr};
   result = mpv_command(mpv_, load);
   if (result >= 0) {
@@ -153,6 +182,21 @@ bool VideoRenderer::start(QString *error) {
     mpv_set_property_string(mpv_, "loop-file", spec_.loop ? "inf" : "no");
     mpv_set_property_string(mpv_, "mute", spec_.volume <= 0.0 ? "yes" : "no");
   }
+
+  // One-time startup diagnostics on the child's stderr (the daemon forwards it
+  // to the journal): what we probed, what we got, and how we will read back.
+  auto *functions = context_->functions();
+  const char *glRenderer =
+      reinterpret_cast<const char *>(functions->glGetString(GL_RENDERER));
+  initializeAsyncReadback();
+  ::fprintf(stderr,
+            "anispaper video: gpu-probe=%s gl-renderer=%s hwdec=%s%s readback=%s\n",
+            gpuVendorId(vendor).toLatin1().constData(),
+            glRenderer ? glRenderer : "unknown", hwdecMethod.constData(),
+            overrideValue.isEmpty() ? "" : " (override)",
+            asyncReadback_ ? "async-pbo" : "sync");
+  ::fflush(stderr);
+
   context_->doneCurrent();
   if (result < 0) {
     if (error) {
@@ -184,6 +228,7 @@ void VideoRenderer::stop() {
     mpv_render_context_set_update_callback(renderContext_, nullptr, nullptr);
   }
   if (context_ && surface_ && context_->makeCurrent(surface_.get())) {
+    releaseReadbackResources();
     if (renderContext_) {
       mpv_render_context_free(renderContext_);
       renderContext_ = nullptr;
@@ -207,7 +252,15 @@ void VideoRenderer::pause() {
     return;
   }
   paused_ = true;
-  mpv_set_property_string(mpv_, "pause", "yes");
+  if (frameStepped_) {
+    // Stepped mode is timer-driven: no ticks means no decode, no render,
+    // no readback.  (mpv is already permanently paused here.)
+    frameTimer_.stop();
+  } else {
+    // Clock mode keeps the timer alive so the daemon's watchdog still sees
+    // renderer liveness; mpv itself freezes on its pause property.
+    mpv_set_property_string(mpv_, "pause", "yes");
+  }
 }
 
 void VideoRenderer::resume() {
@@ -216,7 +269,16 @@ void VideoRenderer::resume() {
   }
   paused_ = false;
   framePending_.store(true, std::memory_order_release);
-  mpv_set_property_string(mpv_, "pause", "no");
+  if (frameStepped_) {
+    frameTimer_.start(qMax(1, qRound(1000.0 / qBound(1, effectiveFps(), 60))));
+  } else {
+    mpv_set_property_string(mpv_, "pause", "no");
+  }
+}
+
+int VideoRenderer::effectiveFps() const {
+  return sourceRateConfigured_ ? qMin(spec_.fps, nativeFps_)
+                               : qBound(1, spec_.fps, 60);
 }
 
 QImage VideoRenderer::lastFrame() const { return frame_; }
@@ -233,10 +295,18 @@ void VideoRenderer::applyPlayback(int fps, double volume) {
     const QByteArray value = QByteArray::number(spec_.volume * 100.0, 'f', 1);
     mpv_set_property_string(mpv_, "volume", value.constData());
     mpv_set_property_string(mpv_, "mute", spec_.volume <= 0.0 ? "yes" : "no");
+    // Volume flipped at runtime: switch between frame-stepped (muted, timer
+    // driven) and clock playback (audible, mpv's own clock).
+    if (running_ && !paused_) {
+      const bool stepped = spec_.volume <= 0.0;
+      if (stepped != frameStepped_) {
+        frameStepped_ = stepped;
+        mpv_set_property_string(mpv_, "pause", stepped ? "yes" : "no");
+      }
+    }
   }
   if (running_ && !paused_) {
-    const int effective = sourceRateConfigured_ ? qMin(spec_.fps, nativeFps_) : spec_.fps;
-    frameTimer_.start(qMax(1, 1000 / qBound(1, effective, 60)));
+    frameTimer_.start(qMax(1, 1000 / qBound(1, effectiveFps(), 60)));
   }
 }
 
@@ -253,13 +323,151 @@ void VideoRenderer::onMpvUpdate(void *context) {
   }
 }
 
+bool VideoRenderer::initializeAsyncReadback() {
+  // Fence/mapped-readback entry points come from the driver, not from a
+  // versioned Qt function class: the offscreen surface only requests a 2.1
+  // profile while the fence API arrived in GL 3.2.  When any entry point is
+  // missing the synchronous readback path below stays available.
+  gl_ = context_->functions();
+  const auto resolve = [this](const char *name) -> void * {
+    return reinterpret_cast<void *>(context_->getProcAddress(name));
+  };
+  sync_.fenceSync =
+      reinterpret_cast<decltype(sync_.fenceSync)>(resolve("glFenceSync"));
+  sync_.clientWaitSync =
+      reinterpret_cast<decltype(sync_.clientWaitSync)>(resolve("glClientWaitSync"));
+  sync_.deleteSync =
+      reinterpret_cast<decltype(sync_.deleteSync)>(resolve("glDeleteSync"));
+  sync_.mapBufferRange =
+      reinterpret_cast<decltype(sync_.mapBufferRange)>(resolve("glMapBufferRange"));
+  sync_.unmapBuffer =
+      reinterpret_cast<decltype(sync_.unmapBuffer)>(resolve("glUnmapBuffer"));
+  if (!sync_.valid() || !gl_) {
+    return false;
+  }
+  const size_t bytes = static_cast<size_t>(spec_.width) * static_cast<size_t>(spec_.height) * 4;
+  freeCount_ = 0;
+  for (int i = 0; i < 3; ++i) {
+    gl_->glGenBuffers(1, &freePbos_[i]);
+    gl_->glBindBuffer(GL_PIXEL_PACK_BUFFER, freePbos_[i]);
+    gl_->glBufferData(GL_PIXEL_PACK_BUFFER, static_cast<GLsizeiptr>(bytes), nullptr,
+                      GL_STREAM_READ);
+    freeCount_++;
+  }
+  gl_->glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+  inflightHead_ = 0;
+  inflightCount_ = 0;
+  readbackSize_ = QSize(spec_.width, spec_.height);
+  // The async path always reads four-byte RGBA; allocate the destination once.
+  frame_ = QImage(spec_.width, spec_.height, QImage::Format_RGBA8888);
+  asyncReadback_ = !frame_.isNull();
+  return asyncReadback_;
+}
+
+void VideoRenderer::submitAsyncReadback() {
+  if (!asyncReadback_ || freeCount_ == 0) {
+    // Consumer side is more than three frames behind: drop this capture
+    // instead of stalling; the next tick retries with the newest content.
+    return;
+  }
+  const quint32 pbo = freePbos_[--freeCount_];
+  gl_->glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo);
+  gl_->glPixelStorei(GL_PACK_ALIGNMENT, 4);
+  gl_->glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+  gl_->glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+  gl_->glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+  gl_->glReadPixels(0, 0, spec_.width, spec_.height, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+  gl_->glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+  void *fence = sync_.fenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+  if (!fence) {
+    freePbos_[freeCount_++] = pbo;
+    return;
+  }
+  const int slot = (inflightHead_ + inflightCount_) % 3;
+  inflight_[slot] = PackRead{pbo, fence};
+  inflightCount_++;
+}
+
+bool VideoRenderer::consumeOldestReadback() {
+  if (inflightCount_ == 0) {
+    return false;
+  }
+  PackRead front = inflight_[inflightHead_];
+  const unsigned int status = sync_.clientWaitSync(front.fence, 0, 0);
+  if (status == GL_TIMEOUT_EXPIRED) {
+    return false;
+  }
+  inflightHead_ = (inflightHead_ + 1) % 3;
+  inflightCount_--;
+  if (status == GL_WAIT_FAILED) {
+    sync_.deleteSync(front.fence);
+    freePbos_[freeCount_++] = front.pbo;
+    return false;
+  }
+  sync_.deleteSync(front.fence);
+  bool copied = false;
+  const size_t bytes = static_cast<size_t>(spec_.width) * static_cast<size_t>(spec_.height) * 4;
+  gl_->glBindBuffer(GL_PIXEL_PACK_BUFFER, front.pbo);
+  const uchar *mapped = static_cast<const uchar *>(
+      sync_.mapBufferRange(GL_PIXEL_PACK_BUFFER, 0, static_cast<qint64>(bytes),
+                           GL_MAP_READ_BIT));
+  if (mapped && !frame_.isNull()) {
+    // GL content is bottom-up.  Copying with reversed source rows lands the
+    // frame top-down in one pass, replacing the separate flip loop.
+    const int height = frame_.height();
+    uchar *destination = frame_.bits();
+    const qsizetype rowBytes = frame_.bytesPerLine();
+    const size_t glRowBytes = static_cast<size_t>(spec_.width) * 4;
+    for (int row = 0; row < height; ++row) {
+      std::memcpy(destination + row * rowBytes,
+                  mapped + static_cast<size_t>(height - 1 - row) * glRowBytes,
+                  glRowBytes);
+    }
+    copied = true;
+  }
+  sync_.unmapBuffer(GL_PIXEL_PACK_BUFFER);
+  gl_->glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+  freePbos_[freeCount_++] = front.pbo;
+  return copied;
+}
+
+void VideoRenderer::releaseReadbackResources() {
+  if (!gl_) {
+    asyncReadback_ = false;
+    return;
+  }
+  for (int i = 0; i < inflightCount_; ++i) {
+    const int slot = (inflightHead_ + i) % 3;
+    if (inflight_[slot].fence) {
+      sync_.deleteSync(inflight_[slot].fence);
+    }
+    if (inflight_[slot].pbo) {
+      gl_->glDeleteBuffers(1, &inflight_[slot].pbo);
+    }
+    inflight_[slot] = PackRead{};
+  }
+  inflightHead_ = 0;
+  inflightCount_ = 0;
+  for (int i = 0; i < freeCount_; ++i) {
+    if (freePbos_[i]) {
+      gl_->glDeleteBuffers(1, &freePbos_[i]);
+    }
+    freePbos_[i] = 0;
+  }
+  freeCount_ = 0;
+  asyncReadback_ = false;
+}
+
 void VideoRenderer::renderFrame() {
   if (!running_ || paused_ || failed_ || !context_ || !surface_ || !fbo_ ||
       !renderContext_) {
     return;
   }
-  if (!framePending_.exchange(false, std::memory_order_acq_rel)) {
-    return;
+  if (!frameStepped_) {
+    // Clock mode: render strictly when mpv says a new frame is ready.
+    if (!framePending_.exchange(false, std::memory_order_acq_rel)) {
+      return;
+    }
   }
   if (!context_->makeCurrent(surface_.get())) {
     fail(QStringLiteral("unable to make video OpenGL context current"));
@@ -267,7 +475,27 @@ void VideoRenderer::renderFrame() {
   }
   pumpEvents();
   const uint64_t updateFlags = mpv_render_context_update(renderContext_);
-  if ((updateFlags & MPV_RENDER_UPDATE_FRAME) == 0) {
+  bool haveFrame = (updateFlags & MPV_RENDER_UPDATE_FRAME) != 0;
+  if (frameStepped_ && haveFrame) {
+    // Push mode: mpv is paused, so the only thing that makes it produce the
+    // next frame is our command.  Send it after this render is drained —
+    // exactly one step per published frame, and only when the previous step
+    // has actually been consumed (no backlog, no double-advance).
+    const char *advance[] = {"frame-step", nullptr};
+    const int stepResult = mpv_command(mpv_, advance);
+    if (stepResult < 0) {
+      ::fprintf(stderr, "anispaper video: frame-step rc=%d %s\n", stepResult,
+                mpv_error_string(stepResult));
+      ::fflush(stderr);
+    }
+  }
+  if (!haveFrame) {
+    // No new mpv frame yet.  The PBO ring may still hold an unconsumed
+    // (fence-signalled) read from the previous tick; publish it now instead of
+    // waiting for the next decoded frame.
+    if (asyncReadback_ && consumeOldestReadback()) {
+      ++frameCount_;
+    }
     context_->doneCurrent();
     return;
   }
@@ -290,45 +518,58 @@ void VideoRenderer::renderFrame() {
   // libmpv owns OpenGL state while it renders.  In particular it may leave a
   // different read framebuffer or PACK parameters bound; reading immediately
   // afterwards produced sparse horizontal rows at a 1920x1080 physical FBO.
-  // Rebind our target and reset every packing field that affects QImage's
-  // tightly packed RGBA destination before taking the pixels back.
+  // Rebind our target and reset every packing field that affects tightly
+  // packed destination rows before taking the pixels back.
   fbo_->bind();
-  gl->glPixelStorei(GL_PACK_ALIGNMENT, 1);
-  gl->glPixelStorei(GL_PACK_ROW_LENGTH, 0);
-  gl->glPixelStorei(GL_PACK_SKIP_ROWS, 0);
-  gl->glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
-  const QSize targetSize(spec_.width, spec_.height);
-  const qsizetype compactRgbStride = static_cast<qsizetype>(spec_.width) * 3;
-  const bool knownReadbackFormat =
-      frame_.format() == QImage::Format_RGB888 ||
-      frame_.format() == QImage::Format_RGBA8888;
-  if (frame_.size() != targetSize || !knownReadbackFormat) {
-    frame_ = QImage(spec_.width, spec_.height, QImage::Format_RGB888);
-    // QImage may pad RGB888 rows.  OpenGL can write the compact form only
-    // when the Qt stride matches exactly; otherwise retain the established
-    // RGBA path, whose four-byte stride is always compact for our outputs.
-    if (frame_.bytesPerLine() != compactRgbStride) {
-      frame_ = QImage(spec_.width, spec_.height, QImage::Format_RGBA8888);
-    }
-  }
-  if (frame_.isNull()) {
+
+  if (asyncReadback_) {
+    // Queue this frame's read (no CPU wait; the GPU executes it in order while
+    // we continue), then publish the previous frame's completed readback.
+    submitAsyncReadback();
+    const bool consumed = consumeOldestReadback();
     fbo_->release();
     context_->doneCurrent();
-    fail(QStringLiteral("unable to allocate video readback image"));
-    return;
-  }
-  const GLenum readFormat = frame_.format() == QImage::Format_RGB888 ? GL_RGB : GL_RGBA;
-  gl->glReadPixels(0, 0, spec_.width, spec_.height, readFormat,
-                   GL_UNSIGNED_BYTE, frame_.bits());
-  fbo_->release();
-  context_->doneCurrent();
-  // Do not use QImage::flip() here: Qt allocates a new QImageData block on
-  // every call for this shared frame path.  Swap rows through one reusable
-  // scratch row instead, preserving the top-down orientation without a
-  // per-frame heap allocation.
-  if (!flipFrameInPlace()) {
-    fail(QStringLiteral("unable to flip video readback image"));
-    return;
+    if (!consumed) {
+      return;
+    }
+  } else {
+    gl->glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    gl->glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+    gl->glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+    gl->glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+    const QSize targetSize(spec_.width, spec_.height);
+    const qsizetype compactRgbStride = static_cast<qsizetype>(spec_.width) * 3;
+    const bool knownReadbackFormat =
+        frame_.format() == QImage::Format_RGB888 ||
+        frame_.format() == QImage::Format_RGBA8888;
+    if (frame_.size() != targetSize || !knownReadbackFormat) {
+      frame_ = QImage(spec_.width, spec_.height, QImage::Format_RGB888);
+      // QImage may pad RGB888 rows.  OpenGL can write the compact form only
+      // when the Qt stride matches exactly; otherwise retain the established
+      // RGBA path, whose four-byte stride is always compact for our outputs.
+      if (frame_.bytesPerLine() != compactRgbStride) {
+        frame_ = QImage(spec_.width, spec_.height, QImage::Format_RGBA8888);
+      }
+    }
+    if (frame_.isNull()) {
+      fbo_->release();
+      context_->doneCurrent();
+      fail(QStringLiteral("unable to allocate video readback image"));
+      return;
+    }
+    const GLenum readFormat = frame_.format() == QImage::Format_RGB888 ? GL_RGB : GL_RGBA;
+    gl->glReadPixels(0, 0, spec_.width, spec_.height, readFormat,
+                     GL_UNSIGNED_BYTE, frame_.bits());
+    fbo_->release();
+    context_->doneCurrent();
+    // Do not use QImage::flip() here: Qt allocates a new QImageData block on
+    // every call for this shared frame path.  Swap rows through one reusable
+    // scratch row instead, preserving the top-down orientation without a
+    // per-frame heap allocation.
+    if (!flipFrameInPlace()) {
+      fail(QStringLiteral("unable to flip video readback image"));
+      return;
+    }
   }
   ++frameCount_;
   const qint64 now = QDateTime::currentMSecsSinceEpoch();
@@ -398,6 +639,14 @@ void VideoRenderer::pumpEvents() {
             frameTimer_.start(qMax(1, qRound(1000.0 / effective)));
           }
         }
+      }
+      // Report the decoder mpv actually engaged for this file once; a
+      // hardware method that failed to initialize shows up here as "no".
+      char *active = mpv_get_property_string(mpv_, "hwdec-current");
+      ::fprintf(stderr, "anispaper video: hwdec-current=%s\n", active ? active : "no");
+      ::fflush(stderr);
+      if (active) {
+        mpv_free(active);
       }
     }
   }
