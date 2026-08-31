@@ -76,9 +76,6 @@ class VideoRenderer final : public Renderer {
   bool running_ = false;
   bool paused_ = false;
   bool failed_ = false;
-  // Muted playback advances via frame-step from the frame timer; audible
-  // playback keeps mpv's continuous clock for audio sync.
-  bool frameStepped_ = false;
   std::atomic_bool framePending_{true};
   int frameCount_ = 0;
   qint64 fpsEpochMs_ = 0;

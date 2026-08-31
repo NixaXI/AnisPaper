@@ -164,14 +164,6 @@ bool VideoRenderer::start(QString *error) {
                                          this);
 
   const QByteArray source = QFileInfo(spec_.file).absoluteFilePath().toUtf8();
-  // Frame-stepped playback for muted wallpapers: mpv stays paused and the
-  // frame timer drives advancement one frame-step at a time, so a 60 fps
-  // source under a 20 fps cap costs 20 decoder runs and 20 GPU->RAM vaapi
-  // copies per second instead of 60.  Audible wallpapers keep mpv's clock
-  // (audio needs continuous playback) and fall back to the render-on-update
-  // flow; applyPlayback flips the mode if volume changes at runtime.
-  frameStepped_ = spec_.volume <= 0.0;
-  if (result >= 0 && frameStepped_) result = setOption("pause", "yes");
   const char *load[] = {"loadfile", source.constData(), "replace", nullptr};
   result = mpv_command(mpv_, load);
   if (result >= 0) {
@@ -252,15 +244,9 @@ void VideoRenderer::pause() {
     return;
   }
   paused_ = true;
-  if (frameStepped_) {
-    // Stepped mode is timer-driven: no ticks means no decode, no render,
-    // no readback.  (mpv is already permanently paused here.)
-    frameTimer_.stop();
-  } else {
-    // Clock mode keeps the timer alive so the daemon's watchdog still sees
-    // renderer liveness; mpv itself freezes on its pause property.
-    mpv_set_property_string(mpv_, "pause", "yes");
-  }
+  // mpv freezes on its pause property; the frame timer stays armed so the
+  // watchdog still observes renderer liveness while nothing is decoded.
+  mpv_set_property_string(mpv_, "pause", "yes");
 }
 
 void VideoRenderer::resume() {
@@ -269,11 +255,7 @@ void VideoRenderer::resume() {
   }
   paused_ = false;
   framePending_.store(true, std::memory_order_release);
-  if (frameStepped_) {
-    frameTimer_.start(qMax(1, qRound(1000.0 / qBound(1, effectiveFps(), 60))));
-  } else {
-    mpv_set_property_string(mpv_, "pause", "no");
-  }
+  mpv_set_property_string(mpv_, "pause", "no");
 }
 
 int VideoRenderer::effectiveFps() const {
@@ -295,15 +277,6 @@ void VideoRenderer::applyPlayback(int fps, double volume) {
     const QByteArray value = QByteArray::number(spec_.volume * 100.0, 'f', 1);
     mpv_set_property_string(mpv_, "volume", value.constData());
     mpv_set_property_string(mpv_, "mute", spec_.volume <= 0.0 ? "yes" : "no");
-    // Volume flipped at runtime: switch between frame-stepped (muted, timer
-    // driven) and clock playback (audible, mpv's own clock).
-    if (running_ && !paused_) {
-      const bool stepped = spec_.volume <= 0.0;
-      if (stepped != frameStepped_) {
-        frameStepped_ = stepped;
-        mpv_set_property_string(mpv_, "pause", stepped ? "yes" : "no");
-      }
-    }
   }
   if (running_ && !paused_) {
     frameTimer_.start(qMax(1, 1000 / qBound(1, effectiveFps(), 60)));
@@ -481,11 +454,8 @@ void VideoRenderer::renderFrame() {
       !renderContext_) {
     return;
   }
-  if (!frameStepped_) {
-    // Clock mode: render strictly when mpv says a new frame is ready.
-    if (!framePending_.exchange(false, std::memory_order_acq_rel)) {
-      return;
-    }
+  if (!framePending_.exchange(false, std::memory_order_acq_rel)) {
+    return;
   }
   if (!context_->makeCurrent(surface_.get())) {
     fail(QStringLiteral("unable to make video OpenGL context current"));
@@ -494,19 +464,6 @@ void VideoRenderer::renderFrame() {
   pumpEvents();
   const uint64_t updateFlags = mpv_render_context_update(renderContext_);
   bool haveFrame = (updateFlags & MPV_RENDER_UPDATE_FRAME) != 0;
-  if (frameStepped_ && haveFrame) {
-    // Push mode: mpv is paused, so the only thing that makes it produce the
-    // next frame is our command.  Send it after this render is drained —
-    // exactly one step per published frame, and only when the previous step
-    // has actually been consumed (no backlog, no double-advance).
-    const char *advance[] = {"frame-step", nullptr};
-    const int stepResult = mpv_command(mpv_, advance);
-    if (stepResult < 0) {
-      ::fprintf(stderr, "anispaper video: frame-step rc=%d %s\n", stepResult,
-                mpv_error_string(stepResult));
-      ::fflush(stderr);
-    }
-  }
   if (!haveFrame) {
     // No new mpv frame yet.  The PBO ring may still hold an unconsumed
     // (fence-signalled) read from the previous tick; publish it now instead of

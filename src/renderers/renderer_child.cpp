@@ -112,7 +112,6 @@ class ChildProtocol final : public QObject {
     // publish(QImage) path.
     if (auto *video = qobject_cast<VideoRenderer *>(renderer_)) {
       video->setFrameTransport(&transport_);
-      videoDirectPublish_ = true;
     }
     publish({{QStringLiteral("event"), QStringLiteral("transport")},
              {QStringLiteral("path"), transport_.name()},
@@ -168,20 +167,18 @@ class ChildProtocol final : public QObject {
         QStringLiteral("1")) {
       return;
     }
-    // Video direct-publish: the renderer already landed this frame in the
+    // Direct-published frame: the renderer already landed this frame in the
     // transport slot inside consumeOldestReadback(), so the sequence moved
     // past what we last announced.  Only the tiny notification crosses the
-    // pipe — the QImage (and the second slot copy) never happens.
-    if (videoDirectPublish_) {
-      if (transport_.frameNo() > announcedSeq_) {
-        announcedSeq_ = transport_.frameNo();
-        publish({{QStringLiteral("event"), QStringLiteral("frame")},
-                 {QStringLiteral("shm"), true},
-                 {QStringLiteral("seq"), static_cast<qint64>(announcedSeq_)},
-                 {QStringLiteral("width"), transport_.width()},
-                 {QStringLiteral("height"), transport_.height()},
-                 {QStringLiteral("fallback"), renderer_->isFallback()}});
-      }
+    // pipe — no second slot copy.
+    if (transport_.isActive() && transport_.frameNo() > announcedSeq_) {
+      announcedSeq_ = transport_.frameNo();
+      publish({{QStringLiteral("event"), QStringLiteral("frame")},
+               {QStringLiteral("shm"), true},
+               {QStringLiteral("seq"), static_cast<qint64>(announcedSeq_)},
+               {QStringLiteral("width"), transport_.width()},
+               {QStringLiteral("height"), transport_.height()},
+               {QStringLiteral("fallback"), renderer_->isFallback()}});
       return;
     }
     // Preferred path: a single memcpy into the shared slot plus a tiny
@@ -219,7 +216,6 @@ class ChildProtocol final : public QObject {
   Renderer *renderer_ = nullptr;
   ShmFrameTransport transport_;
   bool useTransport_ = false;
-  bool videoDirectPublish_ = false;
   quint64 announcedSeq_ = 0;
   QSocketNotifier stdinNotifier_;
   QByteArray commands_;
