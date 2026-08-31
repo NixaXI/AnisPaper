@@ -98,8 +98,12 @@ add_executable(anis-paperd
     src/daemon/plasma_login_wallpaper.cpp
     src/daemon/plasma_wallpaper_activator.h
     src/daemon/plasma_wallpaper_activator.cpp
+    src/common/gpu_vendor.h
+    src/common/gpu_vendor.cpp
     src/common/wayland_monitor.cpp
     src/renderers/renderer.h
+    src/renderers/shm_frame_transport.h
+    src/renderers/shm_frame_transport.cpp
     src/renderers/static_image_renderer.h
     src/renderers/static_image_renderer.cpp
     src/renderers/scene_renderer.h
@@ -317,6 +321,20 @@ if(BUILD_TESTING)
   else()
     add_test(NAME plasma_wallpaper_activator
         COMMAND $<TARGET_FILE:anispaper-plasma-wallpaper-activator-test>)
+  endif()
+  add_executable(anispaper-gpu-vendor-test
+      tests/gpu_vendor_test.cpp
+      src/common/gpu_vendor.h
+      src/common/gpu_vendor.cpp)
+  target_compile_features(anispaper-gpu-vendor-test PRIVATE cxx_std_20)
+  target_link_libraries(anispaper-gpu-vendor-test PRIVATE Qt6::Core)
+  target_compile_options(anispaper-gpu-vendor-test PRIVATE -Wall -Wextra -Wpedantic)
+  if(ANISPAPER_ELF_LOADER)
+    add_test(NAME gpu_vendor
+        COMMAND ${ANISPAPER_ELF_LOADER} $<TARGET_FILE:anispaper-gpu-vendor-test>)
+  else()
+    add_test(NAME gpu_vendor
+        COMMAND $<TARGET_FILE:anispaper-gpu-vendor-test>)
   endif()
   add_test(NAME f1_integration COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/f1_integration.py $<TARGET_FILE:anis-paperd>)
   set_tests_properties(f1_integration PROPERTIES SKIP_RETURN_CODE 77)

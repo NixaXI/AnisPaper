@@ -939,6 +939,55 @@ ApplicationWindow {
                                     }
                                 }
                             }
+                            ComboBox {
+                                id: outputCombo
+                                model: client.monitorNames
+                                currentIndex: Math.max(0, client.monitorNames.indexOf(client.selectedOutput))
+                                onActivated: client.selectedOutput = currentText
+                                implicitHeight: 32
+                                width: Math.min(240, parent.width)
+                                font.pixelSize: 11
+                                contentItem: Text {
+                                    text: outputCombo.displayText
+                                    color: cCream
+                                    font.pixelSize: 11
+                                    font.bold: true
+                                    font.letterSpacing: 1.2
+                                    leftPadding: 12
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                                background: Rectangle {
+                                    radius: 99
+                                    color: "#8c0a0a0c"
+                                    border.width: 1
+                                    border.color: outputCombo.popup.visible ? cAccent : cLineSoft
+                                }
+                                indicator: Text {
+                                    x: outputCombo.width - width - 12
+                                    y: (outputCombo.height - height) / 2
+                                    text: "▾"
+                                    color: cMuted
+                                    font.pixelSize: 10
+                                }
+                                delegate: ItemDelegate {
+                                    id: comboDelegate
+                                    required property string modelData
+                                    required property int index
+                                    width: outputCombo.width
+                                    height: 34
+                                    highlighted: outputCombo.highlightedIndex === index
+                                    contentItem: Text {
+                                        text: comboDelegate.modelData
+                                        color: comboDelegate.modelData === client.selectedOutput ? cAccent : cCream
+                                        font.pixelSize: 11
+                                        verticalAlignment: Text.AlignVCenter
+                                        leftPadding: 12
+                                    }
+                                    background: Rectangle {
+                                        color: comboDelegate.highlighted ? "#26ffd54a" : "transparent"
+                                    }
+                                }
+                            }
                             Row {
                                 spacing: 10
                                 Button {

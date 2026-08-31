@@ -670,7 +670,21 @@ void RpcClient::applySelected() {
        [this](const QJsonValue &, const QString &error) {
          setApplying(false);
          if (!error.isEmpty()) {
-           setToast(error);
+           // Expected, non-fatal states read as guidance instead of surfacing
+           // the raw renderer-unavailable RPC error on every attempt.
+           if (error.startsWith(QStringLiteral("renderer unavailable: static"))) {
+             setToast(QStringLiteral("Las imágenes estáticas son previews del "
+                                     "catálogo, no wallpapers animados."));
+           } else if (error.startsWith(QStringLiteral("renderer unavailable"))) {
+             setToast(QStringLiteral("Ese wallpaper no tiene renderer disponible "
+                                     "(proyecto dañado o tipo no soportado). "
+                                     "Revisá el journal de anispaper."));
+           } else if (error == QStringLiteral("safe mode active")) {
+             setToast(QStringLiteral("Modo seguro activo: detené el wallpaper y "
+                                     "volvé a aplicarlo para reintentar."));
+           } else {
+             setToast(error);
+           }
            return;
          }
          setToast(QStringLiteral("Wallpaper aplicado en %1").arg(selectedOutput_));

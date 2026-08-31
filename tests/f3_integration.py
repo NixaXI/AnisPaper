@@ -149,6 +149,13 @@ def main():
         config = root / "config"
         runtime.mkdir()
         config.mkdir()
+        # The daemon's game detector scans system-wide processes, so a game
+        # running on the host (gamingMode defaults to "auto") would pause the
+        # test wallpaper and starve the frame-count assertions below.  Force
+        # the detector off for this sandboxed instance.
+        (config / "anispaper" ).mkdir()
+        (config / "anispaper" / "settings.json").write_text(
+            json.dumps({"gamingMode": "off"}), encoding="utf-8")
         env = os.environ.copy()
         env.update({
             "XDG_RUNTIME_DIR": str(runtime),
@@ -160,7 +167,9 @@ def main():
         if parent_runtime:
             env["ANISPAPER_RENDERER_RUNTIME_DIR"] = parent_runtime
         process = subprocess.Popen([str(daemon_binary)], env=env, text=True,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                   stdout=subprocess.PIPE,
+                                   stderr=open(root / "daemon.log", "w"))
+        daemon_log = root / "daemon.log"
         rpc = None
         output = "F3/Bridge: Test"
         shm_path = pathlib.Path("/dev/shm") / "anispaper-F3_Bridge__Test"
@@ -206,7 +215,9 @@ def main():
                     break
                 time.sleep(0.025)
             require(sequence[-1] >= 100,
-                    f"daemon did not publish 100 frames: final={sequence[-1]}")
+                    f"daemon did not publish 100 frames: final={sequence[-1]}; "
+                    f"stderr tail: " + (daemon_log.read_text(encoding="utf-8", errors="replace")[-1500:]
+                                        if daemon_log.exists() else "<no log>"))
             require(len(set(sequence)) >= 20,
                     f"bridge sequence did not advance enough: {len(set(sequence))}")
 

@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    name: Build + ctest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04]
+    env:
+      # The vendored scene engine is heavy; CI exercises the daemon, UI,
+      # bridge, plasma plugin and their contract tests instead.
+      ANISPAPER_CI: "1"
+      XDG_RUNTIME_DIR: /tmp/anispaper-ci-runtime
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkg-config ninja-build \
+            qt6-base-dev qt6-declarative-dev qt6-webengine-dev \
+            libkf6auth-dev \
+            libwayland-dev wayland-protocols \
+            libmpv-dev libjpeg-turbo8-dev \
+            libglew-dev freeglut3-dev \
+            libsdl2-dev liblz4-dev libpulse-dev libfreetype-dev libdbus-1-dev \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libxxf86vm-dev \
+            ffmpeg xvfb mesa-utils libgl1-mesa-dri
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DANISPAPER_ENABLE_SCENE_ENGINE=OFF \
+            -DCMAKE_INSTALL_PREFIX="$HOME/.local"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: |
+          mkdir -p "$XDG_RUNTIME_DIR"
+          xvfb-run -a ctest --test-dir build --output-on-failure

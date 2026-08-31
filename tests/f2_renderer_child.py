@@ -7,6 +7,7 @@ import os
 import pathlib
 import select
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -61,6 +62,7 @@ def worker_frame(binary, kind, source, preview, env):
     )
     ready = False
     frame = None
+    transport = None
     deadline = time.monotonic() + 15
     try:
         while time.monotonic() < deadline:
@@ -75,15 +77,31 @@ def worker_frame(binary, kind, source, preview, env):
             message = json.loads(line)
             if message.get("event") == "fatal":
                 raise AssertionError(f"{kind} worker fatal: {message}")
+            if message.get("event") == "transport":
+                transport = message
             if message.get("event") == "ready":
                 ready = True
             if message.get("event") == "frame":
-                raw = base64.b64decode(message["jpeg"], validate=True)
-                require(raw.startswith(b"\xff\xd8") and raw.endswith(b"\xff\xd9"),
-                        f"{kind} worker did not return JPEG")
-                require(message["width"] > 0 and message["height"] > 0,
-                        f"{kind} dimensions are invalid")
-                frame = (message, raw)
+                if message.get("shm"):
+                    # Binary SHM transport path: pixels live in the mapped
+                    # slots, the JSON line only carries the sequence.
+                    require(transport is not None,
+                            f"{kind} frame arrived before its transport event")
+                    require(message["width"] > 0 and message["height"] > 0,
+                            f"{kind} dimensions are invalid")
+                    pixels = shm_slot_pixels(transport, message["seq"])
+                    if pixels is None:
+                        # mpv renders uniform black while the decoder warms
+                        # up; keep waiting for the first frame with content.
+                        continue
+                    frame = (message, pixels)
+                else:
+                    raw = base64.b64decode(message["jpeg"], validate=True)
+                    require(raw.startswith(b"\xff\xd8") and raw.endswith(b"\xff\xd9"),
+                            f"{kind} worker did not return JPEG")
+                    require(message["width"] > 0 and message["height"] > 0,
+                            f"{kind} dimensions are invalid")
+                    frame = (message, raw)
                 break
         require(ready, f"{kind} worker never became ready")
         require(frame is not None and len(frame[1]) > 200,
@@ -107,6 +125,53 @@ def worker_frame(binary, kind, source, preview, env):
             raise AssertionError(
                 f"{kind} worker exit={process.returncode}; stdout={stdout!r}; stderr={stderr!r}"
             )
+
+
+def shm_slot_pixels(transport, seq):
+    """Reads one published RGBA slot from the child's SHM transport."""
+    import mmap as mmap_module
+
+    name = transport["path"]
+    require(name.startswith("/anispaper-scene-"),
+            f"transport name is outside the anispaper namespace: {name}")
+    width = int(transport["width"])
+    height = int(transport["height"])
+    stride = int(transport["stride"])
+    buffers = int(transport["buffers"])
+    header_size = 64
+    slot_bytes = stride * height
+    fd = os.open(f"/dev/shm{os.sep}{name}", os.O_RDONLY)
+    try:
+        mapping = mmap_module.mmap(fd, header_size + slot_bytes * buffers,
+                                   prot=mmap_module.PROT_READ)
+        try:
+            magic = mapping[0:4]
+            require(magic == b"ANST", f"bad transport magic: {magic!r}")
+            # SceneTransportHeader: magic[4], version u32, frameNo u64 @8,
+            # timestampNs u64 @16, writeIndex u32 @24.
+            frame_no = struct.unpack_from("<Q", mapping, 8)[0]
+            require(frame_no >= seq, f"transport sequence regressed: {frame_no} < {seq}")
+            write_index = struct.unpack_from("<I", mapping, 24)[0]
+            require(write_index == seq % buffers,
+                    f"write index {write_index} does not match seq {seq}")
+            offset = header_size + (seq % buffers) * slot_bytes
+            pixels = mapping[offset:offset + slot_bytes]
+            require(len(pixels) == slot_bytes, "short slot read")
+            # The fixture renders testsrc color bars: a real slot carries
+            # varied pixels.  Uniform or empty slots are mpv's black warm-up
+            # frames — report "not yet" so the caller keeps waiting instead
+            # of failing a healthy pipeline.
+            sample = pixels[: min(len(pixels), 4096)]
+            if not any(sample):
+                return None
+            distinct = len(set(sample[i:i + 4] for i in range(0, len(sample) - 3, 4)))
+            if distinct <= 1:
+                return None
+            return bytes(pixels[: width * 4])
+        finally:
+            mapping.close()
+    finally:
+        os.close(fd)
 
 
 def main():
