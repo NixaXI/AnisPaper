@@ -493,7 +493,12 @@ void IsolatedRenderer::parseLine(const QByteArray &line) {
 
 bool IsolatedRenderer::openSceneTransport(const QString &name) {
   closeSceneTransport();
-  if (spec_.type != QStringLiteral("scene") ||
+  // The binary transport started as the scene-engine channel; isolated
+  // video/web children now publish through the same wire ABI so large frames
+  // never cross the pipe as base64 JPEG.
+  if ((spec_.type != QStringLiteral("scene") &&
+       spec_.type != QStringLiteral("video") &&
+       spec_.type != QStringLiteral("web")) ||
       !name.startsWith(QLatin1Char('/'))) {
     return false;
   }

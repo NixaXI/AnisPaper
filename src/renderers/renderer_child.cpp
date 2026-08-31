@@ -1,6 +1,7 @@
 #include "renderer_child.h"
 
 #include "renderer.h"
+#include "shm_frame_transport.h"
 #include "video_renderer.h"
 #include "web_renderer.h"
 
@@ -65,10 +66,10 @@ void benchReportRenderFrames(const char *phase) {
 
 class ChildProtocol final : public QObject {
  public:
-  explicit ChildProtocol(Renderer *renderer, QObject *parent = nullptr)
-      : QObject(parent), renderer_(renderer), stdinNotifier_(STDIN_FILENO,
-                                                            QSocketNotifier::Read,
-                                                            this) {
+  explicit ChildProtocol(Renderer *renderer, bool useShmTransport,
+                         QObject *parent = nullptr)
+      : QObject(parent), renderer_(renderer), useTransport_(useShmTransport),
+        stdinNotifier_(STDIN_FILENO, QSocketNotifier::Read, this) {
     connect(&stdinNotifier_, &QSocketNotifier::activated, this,
             &ChildProtocol::readCommands);
     connect(renderer_, &Renderer::frameReady, this,
@@ -90,6 +91,28 @@ class ChildProtocol final : public QObject {
   void publishReady() {
     publish({{QStringLiteral("event"), QStringLiteral("ready")},
              {QStringLiteral("renderer"), renderer_->rendererName()}});
+  }
+
+  // Creates the binary frame transport and announces it.  Must run after
+  // renderer->start() succeeded and before the first frame so the parent maps
+  // the object in message order.  When creation fails the legacy JPEG path
+  // stays active, which keeps direct child invocations (tests, debugging)
+  // fully functional.
+  void enableTransport(int width, int height) {
+    if (!useTransport_ || !transport_.create(width, height)) {
+      if (useTransport_) {
+        ::fprintf(stderr, "anispaper child: shm transport unavailable, "
+                          "falling back to JPEG over JSON\n");
+        ::fflush(stderr);
+      }
+      return;
+    }
+    publish({{QStringLiteral("event"), QStringLiteral("transport")},
+             {QStringLiteral("path"), transport_.name()},
+             {QStringLiteral("width"), transport_.width()},
+             {QStringLiteral("height"), transport_.height()},
+             {QStringLiteral("stride"), static_cast<int>(transport_.stride())},
+             {QStringLiteral("buffers"), static_cast<int>(ShmFrameTransport::kBuffers)}});
   }
 
  private:
@@ -138,6 +161,18 @@ class ChildProtocol final : public QObject {
         QStringLiteral("1")) {
       return;
     }
+    // Preferred path: a single memcpy into the shared slot plus a tiny
+    // notification.  At 4K this replaces a JPEG encode, a base64 inflate and a
+    // parent-side decode per frame.
+    if (transport_.isActive() && transport_.publish(image)) {
+      publish({{QStringLiteral("event"), QStringLiteral("frame")},
+               {QStringLiteral("shm"), true},
+               {QStringLiteral("seq"), static_cast<qint64>(transport_.frameNo())},
+               {QStringLiteral("width"), image.width()},
+               {QStringLiteral("height"), image.height()},
+               {QStringLiteral("fallback"), renderer_->isFallback()}});
+      return;
+    }
     QByteArray jpeg;
     QBuffer buffer(&jpeg);
     if (!buffer.open(QIODevice::WriteOnly) || !image.save(&buffer, "JPEG", 82)) {
@@ -159,6 +194,8 @@ class ChildProtocol final : public QObject {
   }
 
   Renderer *renderer_ = nullptr;
+  ShmFrameTransport transport_;
+  bool useTransport_ = false;
   QSocketNotifier stdinNotifier_;
   QByteArray commands_;
 };
@@ -278,7 +315,12 @@ int runRendererChild(int argc, char **argv) {
   } else {
     renderer = std::make_unique<WebRenderer>(spec);
   }
-  ChildProtocol protocol(renderer.get());
+  // Binary SHM transport replaces JPEG-over-JSON for large frames.  It is
+  // disabled through the environment for protocol-level tests and direct
+  // debugging invocations that expect the legacy JPEG line format.
+  const bool useShmTransport =
+      qEnvironmentVariable("ANISPAPER_CHILD_SHM_TRANSPORT") != QStringLiteral("0");
+  ChildProtocol protocol(renderer.get(), useShmTransport);
   QString error;
   if (!renderer->start(&error)) {
     const QJsonObject message{{QStringLiteral("event"), QStringLiteral("fatal")},
@@ -288,6 +330,7 @@ int runRendererChild(int argc, char **argv) {
     fflush(stdout);
     return 2;
   }
+  protocol.enableTransport(spec.width, spec.height);
   protocol.publishReady();
   const int result = app.exec();
   benchReportRenderFrames("final");
