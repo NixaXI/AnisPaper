@@ -27,6 +27,11 @@ QString mpvError(int code) {
 VideoRenderer::VideoRenderer(RendererSpec spec, QObject *parent)
     : Renderer(std::move(spec), parent) {
   frameTimer_.setTimerType(Qt::PreciseTimer);
+  // The interval timer is a liveness keepalive now, not the render clock:
+  // renders are driven by mpv's decode callback (queued) and paced by the
+  // deadline guard in renderFrame.  A slow tick here only publishes a matured
+  // PBO readback if the event path went quiet (decoder slower than the cap).
+  frameTimer_.setInterval(200);
   connect(&frameTimer_, &QTimer::timeout, this, &VideoRenderer::renderFrame);
 }
 
@@ -204,7 +209,7 @@ bool VideoRenderer::start(QString *error) {
   frameCount_ = 0;
   sourceRateConfigured_ = false;
   fpsEpochMs_ = QDateTime::currentMSecsSinceEpoch();
-  frameTimer_.start(qMax(1, 1000 / qBound(1, spec_.fps, 60)));
+  frameTimer_.start();  // 200 ms keepalive (see constructor)
   return true;
 }
 
@@ -279,7 +284,7 @@ void VideoRenderer::applyPlayback(int fps, double volume) {
     mpv_set_property_string(mpv_, "mute", spec_.volume <= 0.0 ? "yes" : "no");
   }
   if (running_ && !paused_) {
-    frameTimer_.start(qMax(1, 1000 / qBound(1, effectiveFps(), 60)));
+    frameTimer_.start();  // keepalive; pacing lives in renderFrame's guard
   }
 }
 
@@ -291,9 +296,16 @@ void *VideoRenderer::getProcAddress(void *context, const char *name) {
 
 void VideoRenderer::onMpvUpdate(void *context) {
   auto *renderer = static_cast<VideoRenderer *>(context);
-  if (renderer) {
-    renderer->framePending_.store(true, std::memory_order_release);
+  if (!renderer) {
+    return;
   }
+  renderer->framePending_.store(true, std::memory_order_release);
+  // mpv calls this from its own thread; queue the render on the child's event
+  // loop so a finished decode is shown immediately instead of waiting for the
+  // next timer tick.  The frame timer becomes a rate ceiling only (see
+  // renderFrame's pacing guard), which removes the beat/jitter between the
+  // decoder clock and a fixed 16 ms Qt timer.
+  QMetaObject::invokeMethod(renderer, "renderFrame", Qt::QueuedConnection);
 }
 
 bool VideoRenderer::initializeAsyncReadback() {
@@ -454,9 +466,27 @@ void VideoRenderer::renderFrame() {
       !renderContext_) {
     return;
   }
-  if (!framePending_.exchange(false, std::memory_order_acq_rel)) {
+  // Rate ceiling with absolute-deadline pacing.  Renders are event-driven:
+  // mpv's update callback queues this slot the moment a frame is decoded.
+  // Each render anchors the NEXT one to now + interval (a fixed grid), so a
+  // late callback is postponed to the exact grid slot instead of dropping
+  // (which collapsed the rate to timer multiples) or firing early (jitter).
+  const qint64 now = QDateTime::currentMSecsSinceEpoch();
+  const qint64 intervalMs =
+      qMax<qint64>(1, qRound(1000.0 / qBound(1, effectiveFps(), 60)));
+  const qint64 sinceLast = now - lastRenderMs_;
+  if (sinceLast >= 0 && sinceLast < intervalMs) {
+    // Too soon: re-schedule at the exact remainder (the grid slot), never
+    // drop — dropping collapses the rate; the repost keeps the cadence.
+    QTimer::singleShot(static_cast<int>(intervalMs - sinceLast), this,
+                       [this] { renderFrame(); });
     return;
   }
+  lastRenderMs_ = now;
+  // The exchange stays as the decode gate for the heavy path: without a new
+  // mpv frame there is nothing to render, but the PBO ring may hold a matured
+  // readback worth publishing (see the !haveFrame branch below).
+  const bool newFrame = framePending_.exchange(false, std::memory_order_acq_rel);
   if (!context_->makeCurrent(surface_.get())) {
     fail(QStringLiteral("unable to make video OpenGL context current"));
     return;
@@ -464,12 +494,13 @@ void VideoRenderer::renderFrame() {
   pumpEvents();
   const uint64_t updateFlags = mpv_render_context_update(renderContext_);
   bool haveFrame = (updateFlags & MPV_RENDER_UPDATE_FRAME) != 0;
-  if (!haveFrame) {
+  if (!haveFrame || !newFrame) {
     // No new mpv frame yet.  The PBO ring may still hold an unconsumed
     // (fence-signalled) read from the previous tick; publish it now instead of
     // waiting for the next decoded frame.
     if (asyncReadback_ && consumeOldestReadback()) {
       ++frameCount_;
+      emit frameReady(frame_);
     }
     context_->doneCurrent();
     return;
@@ -547,11 +578,11 @@ void VideoRenderer::renderFrame() {
     }
   }
   ++frameCount_;
-  const qint64 now = QDateTime::currentMSecsSinceEpoch();
-  if (now - fpsEpochMs_ >= 1000) {
+  const qint64 fpsNow = QDateTime::currentMSecsSinceEpoch();
+  if (fpsNow - fpsEpochMs_ >= 1000) {
     fps_ = static_cast<double>(frameCount_) * 1000.0 /
-           static_cast<double>(now - fpsEpochMs_);
-    fpsEpochMs_ = now;
+           static_cast<double>(fpsNow - fpsEpochMs_);
+    fpsEpochMs_ = fpsNow;
     frameCount_ = 0;
   }
   emit frameReady(frame_);
@@ -611,7 +642,9 @@ void VideoRenderer::pumpEvents() {
           const int requested = qBound(1, spec_.fps, 60);
           const int effective = qMin(requested, nativeFps_);
           if (effective != requested) {
-            frameTimer_.start(qMax(1, qRound(1000.0 / effective)));
+            // Lower cap than requested: nothing to do here — the pacing
+            // guard in renderFrame reads effectiveFps() live, and the timer
+            // is only the 200 ms keepalive.
           }
         }
       }

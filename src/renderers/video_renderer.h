@@ -52,10 +52,15 @@ class VideoRenderer final : public Renderer {
   static void onMpvUpdate(void *context);
   void pumpEvents();
   bool flipFrameInPlace();
-  void renderFrame();
   int effectiveFps() const;
   void fail(const QString &reason);
 
+ private slots:
+  // Rate-capped render entry: invoked queued when mpv finishes a frame and
+  // by the interval timer when the decoder is slower than the cap.
+  void renderFrame();
+
+ private:
   // Asynchronous GPU->CPU readback ring.  Submitting a read after each mpv
   // render and consuming the fence-signalled oldest one on the next tick keeps
   // one frame of latency but zero pipeline stalls.
@@ -111,4 +116,7 @@ class VideoRenderer final : public Renderer {
   QSize readbackSize_;
   // Non-owning direct-publish transport (see setFrameTransport).
   ShmFrameTransport *frameTransport_ = nullptr;
+  // Wall-clock of the last completed render, driving the event-driven rate
+  // ceiling in renderFrame (see the pacing guard).
+  qint64 lastRenderMs_ = -100000;
 };
