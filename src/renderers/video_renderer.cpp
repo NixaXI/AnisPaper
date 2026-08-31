@@ -50,6 +50,13 @@ bool VideoRenderer::start(QString *error) {
 
   QSurfaceFormat format;
   format.setRenderableType(QSurfaceFormat::OpenGL);
+  // Legacy 2.1 context: libmpv renders into our FBO through its own GL
+  // bindings, and the async readback resolves fence/map entry points from
+  // the driver directly (see initializeAsyncReadback), so no core profile is
+  // required.  The VAAPI zero-copy interop needs an EGL-owned context that
+  // Qt's offscreen surface cannot provide; use the -copy variant instead
+  // (see recommendedVideoHwdec) and keep the copy cheap with the decode
+  // scale filter below.
   format.setProfile(QSurfaceFormat::NoProfile);
   format.setVersion(2, 1);
   format.setRedBufferSize(8);
@@ -129,6 +136,12 @@ bool VideoRenderer::start(QString *error) {
                                      : recommendedVideoHwdec(vendor).toLatin1();
   if (result >= 0) result = setOption("hwdec", hwdecMethod.constData());
   if (result >= 0) result = setOption("hwdec-codecs", "all");
+  // 4K sources render at the output size: mpv's GL renderer scales decoded
+  // frames with GPU shaders when it composites into our FBO, so no video
+  // filter is needed.  (A lavfi scale filter here would run swscale on the
+  // CPU -- measured 124% for one 4K->1080p stream at 30 fps.)  The vaapi
+  // -copy download still moves source-sized frames, which is a plain DMA
+  // transfer the memory bus absorbs easily at 30 fps.
   // The frame timer renders at the effective wallpaper fps (usually the
   // 20 fps cap), while mpv's decoder otherwise runs at the file's native
   // rate (60 for most workshop videos).  Letting the decoder skip frames

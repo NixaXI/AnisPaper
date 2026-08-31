@@ -97,12 +97,13 @@ QString recommendedVideoHwdec(GpuVendor vendor) {
     case GpuVendor::Intel:
     case GpuVendor::Amd:
     case GpuVendor::Software:
-      // VAAPI is the native decode path on Mesa.  Use the -copy variant:
-      // the pure interop needs a working vaapi-GL surface sharing that is
-      // unavailable in our offscreen context, and our pipeline reads pixels
-      // back to the CPU anyway (SHM/JPEG publish), so a GPU-decoded copy is
-      // the correct shape.  On llvmpipe it silently falls back to software
-      // inside mpv, keeping behaviour unchanged.
+      // VAAPI is the native decode path on Mesa.  The zero-copy interop
+      // needs an EGL-owned GL context that Qt's offscreen surface cannot
+      // provide (verified: hwdec-current=no with a core-profile context),
+      // so use -copy and keep the download cheap by scaling decoded frames
+      // to the output size before the copy (see the vf option in the video
+      // renderer).  mpv falls back to software on its own when even the
+      // copy path is unavailable.
       return QStringLiteral("vaapi-copy");
     case GpuVendor::Nvidia:
       // NVDEC maps directly into the GL texture; VDPAU stays as mpv's own

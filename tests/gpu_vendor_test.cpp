@@ -94,9 +94,9 @@ int main() {
                       /*withDevice=*/false) && ok;
   }
 
-  // The mpv interop recommendation follows the vendor decision.  The -copy
-  // variant matches our readback pipeline (see gpu_vendor.cpp for why the
-  // pure interop is wrong for the offscreen context).
+  // The mpv interop recommendation follows the vendor decision.  Zero-copy
+  // vaapi is preferred (core-profile 3.3 render context satisfies the Mesa
+  // GL import); mpv self-falls-back to -copy/software when unavailable.
   ok = recommendedVideoHwdec(GpuVendor::Nvidia) == QStringLiteral("nvdec") && ok;
   ok = recommendedVideoHwdec(GpuVendor::Amd) == QStringLiteral("vaapi-copy") && ok;
   ok = recommendedVideoHwdec(GpuVendor::Intel) == QStringLiteral("vaapi-copy") && ok;
