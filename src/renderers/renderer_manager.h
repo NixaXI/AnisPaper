@@ -7,6 +7,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QSet>
+#include <QStringList>
 
 class QTimer;
 
@@ -35,6 +36,11 @@ class RendererManager final : public QObject {
   QJsonObject status() const;
   void setGamingMode(const QString &mode);
   void setPlaybackOptions(int fps, double volume);
+  // Fed by the KWin script over D-Bus (see packaging/kwin): the set of outputs
+  // whose wallpaper is currently covered by a fullscreen (or maximized, when
+  // configured) window covers.  Per-output on purpose: a game on one screen
+  // must not freeze the wallpaper on the other.
+  void setCoveredOutputs(const QStringList &outputs);
 
  signals:
   void wallpaperActive(const QJsonObject &event);
@@ -56,6 +62,9 @@ class RendererManager final : public QObject {
     bool sceneNativeUnsupported = false;
     bool rendererReady = false;
     bool handlingFailure = false;
+    // Tracks whether this output's renderer is currently paused by gaming mode
+    // or occlusion, so refreshGamingState only issues real transitions.
+    bool occluded = false;
     quint64 serial = 0;
     QString lastError;
   };
@@ -90,4 +99,7 @@ class RendererManager final : public QObject {
   QTimer *gamingTimer_ = nullptr;
   QString gamingMode_ = QStringLiteral("auto");
   bool gamingActive_ = false;
+  // Outputs the KWin script reports as covered; empty when nothing covers a
+  // wallpaper.
+  QSet<QString> coveredOutputs_;
 };

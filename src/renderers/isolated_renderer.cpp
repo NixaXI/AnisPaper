@@ -1,6 +1,7 @@
 #include "isolated_renderer.h"
 
 #include "../bridge/frame_protocol.h"
+#include "../common/wayland_monitor.h"
 
 #include <QBuffer>
 #include <QCoreApplication>
@@ -131,6 +132,23 @@ bool IsolatedRenderer::start(QString *error) {
   if (running_) {
     return true;
   }
+  // Re-query CURRENT wl_output mode right before spawn.  makeSpec can miss
+  // DP-2's mode during a dual-output restore and leave the 640x480 fallback;
+  // the child FBO and scale_vaapi follow these numbers.
+  if (!spec_.output.isEmpty()) {
+    const QSize physical = physicalWaylandOutputSize(spec_.output);
+    if (physical.width() >= 64 && physical.width() <= 3840 &&
+        physical.height() >= 64 && physical.height() <= 2160) {
+      if (physical.width() != spec_.width || physical.height() != spec_.height) {
+        qInfo().noquote() << "anispaper isolated-renderer: physical"
+                          << physical.width() << "x" << physical.height()
+                          << "overrides spec" << spec_.width << "x" << spec_.height
+                          << "on" << spec_.output;
+      }
+      spec_.width = physical.width();
+      spec_.height = physical.height();
+    }
+  }
   const bool isScene = spec_.type == QStringLiteral("scene");
   if (spec_.type != QStringLiteral("video") && spec_.type != QStringLiteral("web") && !isScene) {
     if (error) {
@@ -199,6 +217,9 @@ bool IsolatedRenderer::start(QString *error) {
   }
   if (!spec_.preview.isEmpty() && !isScene) {
     args << QStringLiteral("--preview") << spec_.preview;
+  }
+  if (!spec_.output.isEmpty() && !isScene) {
+    args << QStringLiteral("--output") << spec_.output;
   }
 
   QProcessEnvironment env = QProcessEnvironment::systemEnvironment();

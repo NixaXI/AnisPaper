@@ -1,0 +1,13 @@
+{
+    "KPackageStructure": "KWin/Script",
+    "KPlugin": {
+        "Description": "Reports fullscreen/maximized windows to the AnisPaper daemon so wallpapers can pause",
+        "Description[es]": "Informa al servicio de AnisPaper cuando hay ventanas en pantalla completa para pausar los fondos",
+        "Icon": "preferences-desktop-wallpaper",
+        "Id": "anispaper-fullscreen",
+        "License": "GPL-3.0-or-later",
+        "Name": "AnisPaper Fullscreen Watcher",
+        "Name[es]": "Detector de pantalla completa de AnisPaper"
+    },
+    "X-Plasma-API": "javascript"
+}

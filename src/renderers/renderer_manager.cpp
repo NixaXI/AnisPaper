@@ -390,25 +390,56 @@ bool RendererManager::steamGameRunning(QString *reason) {
   return false;
 }
 
+void RendererManager::setCoveredOutputs(const QStringList &outputs) {
+  QSet<QString> next;
+  for (const QString &output : outputs) {
+    const QString trimmed = output.trimmed();
+    if (!trimmed.isEmpty()) next.insert(trimmed);
+  }
+  if (next == coveredOutputs_) return;
+  coveredOutputs_ = next;
+  refreshGamingState();
+}
+
 void RendererManager::refreshGamingState() {
   QString reason;
-  bool active = false;
+  // A running game pauses every output: Steam process detection cannot say
+  // which screen the game is on, and a game is a whole-session state.
+  bool pauseAll = false;
   if (gamingMode_ == QStringLiteral("on")) {
-    active = true;
+    pauseAll = true;
     reason = QStringLiteral("settings gamingMode=on");
   } else if (gamingMode_ == QStringLiteral("auto")) {
-    active = steamGameRunning(&reason);
+    pauseAll = steamGameRunning(&reason);
   } else {
     reason = QStringLiteral("settings gamingMode=off");
   }
-  if (active == gamingActive_) return;
-  gamingActive_ = active;
-  qInfo().noquote() << "ANISPAPER_GAMING_MODE"
-                    << (gamingActive_ ? "activated" : "deactivated")
-                    << "mode=" << gamingMode_ << reason;
+  // Occlusion is per-output: a fullscreen window on one screen must not freeze
+  // the wallpaper the user is still looking at on the other.  Reported by the
+  // KWin script (packaging/kwin), since KWin exposes no window-state protocol
+  // to ordinary Wayland clients.
+  const bool honourCovered = gamingMode_ != QStringLiteral("off");
+  const bool anyCovered = honourCovered && !coveredOutputs_.isEmpty();
+  const bool active = pauseAll || anyCovered;
+  if (active != gamingActive_) {
+    gamingActive_ = active;
+    QString detail = reason;
+    if (!pauseAll && anyCovered) {
+      QStringList names(coveredOutputs_.cbegin(), coveredOutputs_.cend());
+      std::sort(names.begin(), names.end());
+      detail = QStringLiteral("windows cover %1").arg(names.join(QLatin1Char(',')));
+    }
+    qInfo().noquote() << "ANISPAPER_GAMING_MODE"
+                      << (gamingActive_ ? "activated" : "deactivated")
+                      << "mode=" << gamingMode_ << detail;
+  }
   for (Entry *entry : std::as_const(byOutput_)) {
     if (!entry || !entry->renderer) continue;
-    if (gamingActive_) {
+    const bool shouldPause =
+        pauseAll || (honourCovered && coveredOutputs_.contains(entry->output));
+    if (shouldPause == entry->occluded) continue;
+    entry->occluded = shouldPause;
+    if (shouldPause) {
       entry->renderer->pause();
     } else if (entry->renderer->isRunning()) {
       entry->renderer->resume();
@@ -458,6 +489,16 @@ RendererSpec RendererManager::makeSpec(const QJsonObject &item,
       physical.height() >= 64 && physical.height() <= 2160) {
     spec.width = physical.width();
     spec.height = physical.height();
+    qInfo().noquote() << "anispaper renderer spec" << output
+                      << spec.width << "x" << spec.height
+                      << "(wl_output CURRENT)";
+  } else {
+    // Unknown/test outputs keep the 640x360 RendererSpec default.  A live
+    // connector must never land here -- IsolatedRenderer re-queries and the
+    // first real frame resizes the bridge if this lookup still missed.
+    qWarning().noquote() << "anispaper renderer spec" << output
+                         << "has no wl_output CURRENT mode; using"
+                         << spec.width << "x" << spec.height;
   }
   return spec;
 }
@@ -503,6 +544,22 @@ void RendererManager::createRenderer(Entry *entry, bool staticFallback) {
   connect(renderer, &Renderer::frameReady, this,
           [this, entry](const QImage &frame) {
             if (!isCurrent(entry) || frame.isNull()) return;
+            // IsolatedRenderer may have corrected a missed CURRENT mode after
+            // the bridge was allocated at the 640x480 spec fallback.  Recreate
+            // at the real physical frame so Plasma never upscales VGA.
+            const QJsonObject bridge = bridges_.statusFor(entry->output);
+            const int bridgeW = bridge.value(QStringLiteral("width")).toInt();
+            const int bridgeH = bridge.value(QStringLiteral("height")).toInt();
+            if ((frame.width() != bridgeW || frame.height() != bridgeH) &&
+                frame.width() >= 64 && frame.width() <= 3840 &&
+                frame.height() >= 64 && frame.height() <= 2160) {
+              QString bridgeError;
+              qInfo().noquote() << "anispaper bridge resize" << entry->output
+                                << bridgeW << "x" << bridgeH << "->"
+                                << frame.width() << "x" << frame.height();
+              bridges_.ensure(entry->output, frame, frame.size(),
+                              entry->spec.scaleMode, &bridgeError);
+            }
             // A bridge can only disappear when its owning entry is stopped;
             // rendering remains isolated even if a transient shm write fails.
             bridges_.publish(entry->output, frame);
@@ -515,14 +572,22 @@ void RendererManager::createRenderer(Entry *entry, bool staticFallback) {
     });
     return;
   }
-  if (gamingActive_ && !staticFallback) {
+  // Pause a freshly created renderer only when ITS output is the occluded one:
+  // gamingActive_ is now a session-wide summary, and a game or fullscreen
+  // window on the other screen must not freeze this one.
+  const bool pauseThisOutput =
+      gamingMode_ == QStringLiteral("on") ||
+      (gamingMode_ != QStringLiteral("off") &&
+       (coveredOutputs_.contains(entry->output) || steamGameRunning()));
+  if (pauseThisOutput && !staticFallback) {
     renderer->pause();
+    entry->occluded = true;
   }
   // A renderer may be intentionally paused before it emits ready when a game
   // is already running (notably the native scene child).  Do not turn that
   // deliberate pause into a watchdog crash; arm the startup deadline when
   // Gaming Mode resumes the renderer instead.
-  if (!staticFallback && !entry->rendererReady && !gamingActive_) {
+  if (!staticFallback && !entry->rendererReady && !entry->occluded) {
     entry->startupTimer->start(startupWindowMs(entry->spec, entry->sceneNativeUnsupported));
   }
 }
@@ -680,7 +745,7 @@ QJsonObject RendererManager::statusFor(const Entry *entry) const {
                 (entry->renderer && entry->renderer->isFallback()) ||
                     (!entry->renderer && !currentFrame.isNull()));
   result.insert(QStringLiteral("lastBackoffSeconds"), entry->lastBackoffSeconds);
-  result.insert(QStringLiteral("gamingPaused"), gamingActive_);
+  result.insert(QStringLiteral("gamingPaused"), entry->occluded);
   result.insert(QStringLiteral("bridge"), bridges_.statusFor(entry->output));
   return result;
 }

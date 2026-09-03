@@ -4,6 +4,7 @@
 #include "shm_frame_transport.h"
 #include "video_renderer.h"
 #include "web_renderer.h"
+#include "../common/wayland_monitor.h"
 
 #include <QApplication>
 #include <QBuffer>
@@ -18,6 +19,7 @@
 #include <atomic>
 #include <memory>
 #include <cmath>
+#include <cerrno>
 
 
 #include <csignal>
@@ -125,7 +127,23 @@ class ChildProtocol final : public QObject {
   void readCommands() {
     char buffer[4096];
     const ssize_t count = ::read(STDIN_FILENO, buffer, sizeof(buffer));
-    if (count <= 0) {
+    if (count == 0) {
+      // EOF: the daemon closed the command pipe (or died).  A descriptor at EOF
+      // stays permanently readable, so leaving the notifier armed turns this
+      // slot into a busy loop -- measured at ~75% of a core, on top of the
+      // render cost and independent of resolution.  There are no further
+      // commands to read on this fd, so stop watching it.  Rendering continues:
+      // an orphaned child is still publishing frames a parent may reattach to,
+      // and the daemon's own watchdog owns the decision to terminate it.
+      stdinNotifier_.setEnabled(false);
+      return;
+    }
+    if (count < 0) {
+      // EAGAIN/EINTR are transient on a non-blocking fd; anything else means
+      // this fd will not become usable again and must not be re-polled.
+      if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        stdinNotifier_.setEnabled(false);
+      }
       return;
     }
     commands_ += QByteArray(buffer, static_cast<int>(count));
@@ -292,6 +310,8 @@ int runRendererChild(int argc, char **argv) {
                                  QStringLiteral("value"));
   QCommandLineOption loopOption(QStringLiteral("loop"), QStringLiteral("loop"),
                                 QStringLiteral("0|1"));
+  QCommandLineOption outputOption(QStringLiteral("output"), QStringLiteral("wl_output name"),
+                                  QStringLiteral("name"));
   parser.addOption(childOption);
   parser.addOption(typeOption);
   parser.addOption(fileOption);
@@ -302,6 +322,7 @@ int runRendererChild(int argc, char **argv) {
   parser.addOption(volumeOption);
   parser.addOption(speedOption);
   parser.addOption(loopOption);
+  parser.addOption(outputOption);
   parser.process(app);
 
   RendererSpec spec;
@@ -325,6 +346,15 @@ int runRendererChild(int argc, char **argv) {
     return 2;
   }
   spec.loop = parser.value(loopOption) != QStringLiteral("0");
+  spec.output = parser.value(outputOption).trimmed();
+  if (!spec.output.isEmpty()) {
+    const QSize physical = physicalWaylandOutputSize(spec.output);
+    if (physical.width() >= 64 && physical.width() <= 3840 &&
+        physical.height() >= 64 && physical.height() <= 2160) {
+      spec.width = physical.width();
+      spec.height = physical.height();
+    }
+  }
 
   if (qEnvironmentVariable("ANISPAPER_TEST_CRASH_ON_START") == QStringLiteral("1")) {
     QTimer::singleShot(0, [] { ::kill(::getpid(), SIGKILL); });

@@ -22,10 +22,21 @@ struct Output {
   int x{}, y{};
   int physicalWidth{}, physicalHeight{};
   int bufferScale = 1;
+  bool hasCurrentMode = false;
 };
 struct State { wl_display *display{}; wl_registry *registry{}; std::vector<std::unique_ptr<Output>> outputs; };
 void geometry(void *d, wl_output*, int32_t x, int32_t y, int32_t, int32_t, int32_t,const char*,const char*,int32_t) { auto *o=static_cast<Output*>(d); o->x=x; o->y=y; }
-void mode(void *d, wl_output*, uint32_t flags, int32_t w, int32_t h, int32_t) { if (flags & WL_OUTPUT_MODE_CURRENT) { auto *o=static_cast<Output*>(d); o->physicalWidth=w; o->physicalHeight=h; } }
+void mode(void *d, wl_output*, uint32_t flags, int32_t w, int32_t h, int32_t) {
+  // CURRENT is the drm mode actually driving the connector (kscreen '*').
+  // PREFERRED on DP-2 is 1280x720 while CURRENT is 1920x1080 -- never use it,
+  // and never fall back to geometry which is logical (1423x800 at 135%).
+  if (flags & WL_OUTPUT_MODE_CURRENT) {
+    auto *o=static_cast<Output*>(d);
+    o->physicalWidth=w;
+    o->physicalHeight=h;
+    o->hasCurrentMode=true;
+  }
+}
 void done(void*, wl_output*) {}
 void scale(void *d, wl_output*, int32_t value) {
   auto *o=static_cast<Output*>(d);
@@ -64,6 +75,19 @@ QJsonArray listWaylandOutputs() {
   QString display=qEnvironmentVariable("WAYLAND_DISPLAY"); if(display.isEmpty()) { auto c=QDir(runtime).entryList({"wayland-*"},QDir::System|QDir::Files,QDir::Name); c.erase(std::remove_if(c.begin(),c.end(),[&](const QString &n){ struct stat st{}; const auto p=QDir(runtime).filePath(n).toUtf8(); return lstat(p.constData(),&st)!=0 || !S_ISSOCK(st.st_mode) || st.st_uid!=geteuid(); }),c.end()); if(c.isEmpty()) return {}; display=c.first(); }
   State s; s.display=wl_display_connect(display.toUtf8().constData()); if(!s.display) return {}; s.registry=wl_display_get_registry(s.display); wl_registry_add_listener(s.registry,&registryListener,&s);
   if(!boundedRoundtrip(s.display,1000) || !boundedRoundtrip(s.display,1000)) { for(auto&o:s.outputs) if(o->object) wl_output_destroy(o->object); if(s.registry) wl_registry_destroy(s.registry); wl_display_disconnect(s.display); return {}; }
+  // Name + CURRENT mode can land after the first two syncs, especially on the
+  // second connector.  Missing CURRENT used to leave RendererSpec at 640x480
+  // and attach scale_vaapi=w=640:h=480 on that child.
+  auto outputsReady = [&] {
+    if (s.outputs.empty()) return true;
+    for (const auto &o : s.outputs) {
+      if (!o->hasCurrentMode || o->physicalWidth <= 0 || o->physicalHeight <= 0) return false;
+    }
+    return true;
+  };
+  for (int extra = 0; extra < 8 && !outputsReady(); ++extra) {
+    if (!boundedRoundtrip(s.display, 250)) break;
+  }
   QJsonArray out;
   for(auto&o:s.outputs) {
     const QJsonObject physical{{"width", o->physicalWidth},
@@ -88,13 +112,20 @@ QJsonArray listWaylandOutputs() {
 QSize physicalWaylandOutputSize(const QString &outputName) {
   const QString wanted = outputName.trimmed();
   if (wanted.isEmpty()) return {};
-  for (const auto value : listWaylandOutputs()) {
-    const QJsonObject output = value.toObject();
-    if (output.value(QStringLiteral("name")).toString() != wanted) continue;
-    const QJsonObject physical = output.value(QStringLiteral("physicalSize")).toObject();
-    const int width = physical.value(QStringLiteral("width")).toInt();
-    const int height = physical.value(QStringLiteral("height")).toInt();
-    if (width > 0 && height > 0) return {width, height};
+  // Two independent connects: the first can race a sibling renderer child's
+  // own wl_display_connect and miss CURRENT on one connector.
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    for (const auto value : listWaylandOutputs()) {
+      const QJsonObject output = value.toObject();
+      if (output.value(QStringLiteral("name")).toString().compare(
+              wanted, Qt::CaseInsensitive) != 0) {
+        continue;
+      }
+      const QJsonObject physical = output.value(QStringLiteral("physicalSize")).toObject();
+      const int width = physical.value(QStringLiteral("width")).toInt();
+      const int height = physical.value(QStringLiteral("height")).toInt();
+      if (width > 0 && height > 0) return {width, height};
+    }
   }
   return {};
 }

@@ -126,6 +126,10 @@ Item {
     height: 64
     property int frameNo: 1
     FrameBridgeSupport { id: support }
+    FrameWatcher {
+        objectName: "watcher"
+        output: "F3-QML"
+    }
     Image {
         objectName: "bridgeImage"
         anchors.fill: parent
@@ -165,12 +169,33 @@ Item {
                     "provider did not map the initial bridge frame") &&
             require(first.pixelColor(2, 2).red() > 180,
                     "initial bridge frame is not the published red image");
-  QSize downsampledSize;
-  const QImage downsampled = provider ? provider->requestImage(
-      QStringLiteral("F3-QML?f=1"), &downsampledSize, QSize(48, 32)) : QImage();
-  ok = require(!downsampled.isNull() && downsampledSize.width() <= 48 &&
-                   downsampledSize.height() <= 32,
-               "provider ignored the QML requested display size") && ok;
+  // Contract change (perf): the provider no longer rescales on the CPU.  It
+  // hands back native bridge pixels whatever display size QML requests, and the
+  // scene graph scales the texture on the GPU.  The old behaviour ran a
+  // SmoothTransformation per frame inside plasmashell -- multi-megabyte and
+  // unavoidable under fractional scaling, where the logical size never equals
+  // the physical bridge size.  Preserving native geometry is also what keeps
+  // the aspect ratio exact for QML's sourceClipRect math.
+  QSize requestedDisplaySize;
+  const QImage nativeForRequest = provider ? provider->requestImage(
+      QStringLiteral("F3-QML?f=1"), &requestedDisplaySize, QSize(48, 32)) : QImage();
+  ok = require(!nativeForRequest.isNull() && requestedDisplaySize == QSize(96, 64),
+               "provider must return native bridge geometry, not a CPU rescale") && ok;
+  ok = require(nativeForRequest.pixelColor(2, 2).red() > 180,
+               "native-size frame lost its published pixels") && ok;
+
+  // The watcher must expose the bridge's native FrameHeader geometry.  QML
+  // derives its cover/fit rectangles from these two properties: reading them
+  // off the Image's implicit size instead (the previous approach) meant the
+  // first paint used the provider's differently-shaped fallback geometry, which
+  // is what showed up on screen as a stretched wallpaper at startup.
+  auto *watcherObject = root->findChild<QObject *>(QStringLiteral("watcher"));
+  ok = require(watcherObject != nullptr, "QML extension did not create FrameWatcher") && ok;
+  if (watcherObject) {
+    ok = require(watcherObject->property("frameWidth").toInt() == 96 &&
+                     watcherObject->property("frameHeight").toInt() == 64,
+                 "FrameWatcher did not publish native bridge geometry") && ok;
+  }
 
   // The bridge's physical backing store must never silently distort a source
   // frame.  Check all three explicit scale modes through the same provider

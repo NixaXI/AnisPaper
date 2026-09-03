@@ -224,6 +224,16 @@ install(FILES
     packaging/plasma/org.anispaper.frame/contents/ui/org/anispaper/frame/qmldir
     packaging/plasma/org.anispaper.frame/contents/ui/org/anispaper/frame/FrameBridgeSupport.qml
     DESTINATION share/plasma/wallpapers/org.anispaper.frame/contents/ui/org/anispaper/frame)
+# KWin script: reports fullscreen/maximized windows to the daemon over D-Bus so
+# occluded wallpapers can pause.  KWin exposes no window-state protocol to
+# ordinary Wayland clients, so this has to run inside the compositor.  The user
+# still has to enable it once (System Settings > Window Management > KWin
+# Scripts, or kwriteconfig6 --file kwinrc --group Plugins --key
+# anispaper-fullscreenEnabled true).
+install(FILES packaging/kwin/anispaper-fullscreen/metadata.json
+    DESTINATION share/kwin/scripts/anispaper-fullscreen)
+install(FILES packaging/kwin/anispaper-fullscreen/contents/code/main.js
+    DESTINATION share/kwin/scripts/anispaper-fullscreen/contents/code)
 configure_file(packaging/systemd/anispaper.service.in anispaper.service @ONLY)
 # User units are discovered under $XDG_DATA_HOME/systemd/user.  With
 # --prefix ~/.local this expands to ~/.local/share/systemd/user, not lib/.

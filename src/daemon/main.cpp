@@ -9,6 +9,8 @@
 #include <QCoreApplication>
 #include <QBuffer>
 #include <QCryptographicHash>
+#include <QDBusConnection>
+#include <QDBusError>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -508,6 +510,33 @@ class Watcher : public QObject {
   int fd_=-1; QSocketNotifier *notifier_{}; QHash<int,Record> paths_; QSet<int> suppress_; QTimer timer_; std::function<void()> changed_; int lastFailures_=0;
 };
 
+// Session-bus surface for the KWin script in packaging/kwin.  KWin exposes no
+// window-state protocol to ordinary Wayland clients (neither
+// zwlr_foreign_toplevel_management nor org_kde_plasma_window_management reach
+// non-plasmashell clients, and /KWin's queryWindowInfo is interactive), so the
+// only supported path is a script running inside the compositor that calls us
+// back.  The surface is deliberately minimal: output names only -- no window
+// titles, no geometry, nothing that could identify what the user is running.
+class GamingDbusAdaptor : public QObject {
+  Q_OBJECT
+  Q_CLASSINFO("D-Bus Interface", "org.anispaper.Gaming")
+
+ public:
+  explicit GamingDbusAdaptor(RendererManager *renderers, QObject *parent = nullptr)
+      : QObject(parent), renderers_(renderers) {}
+
+ public slots:
+  // Names of the outputs whose wallpaper is currently covered; empty list
+  // means nothing is covered.  Per-output so a fullscreen window on one screen
+  // leaves the other screen's wallpaper running.
+  void setCoveredOutputs(const QStringList &outputs) {
+    if (renderers_) renderers_->setCoveredOutputs(outputs);
+  }
+
+ private:
+  RendererManager *renderers_ = nullptr;
+};
+
 class Daemon;
 struct Client { QLocalSocket *socket{}; QByteArray in; bool subscribed=false; qint64 queued=0; };
 class Daemon : public QObject {
@@ -550,6 +579,7 @@ class Daemon : public QObject {
     settings_ = store_.load();
     renderers_->setGamingMode(settings_.gamingMode);
     savedWallpapers_ = loadWallpaperState();
+    registerGamingBus();
     refreshAsync();
   }
 
@@ -636,6 +666,32 @@ class Daemon : public QObject {
     });
   }
  private:
+  // Best-effort: the daemon's own JSON-RPC socket remains its contract, so a
+  // missing or busy session bus is logged and ignored rather than fatal.  When
+  // registration fails the fullscreen watcher simply never reports, and Gaming
+  // Mode falls back to Steam process detection alone.
+  void registerGamingBus() {
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    if (!bus.isConnected()) {
+      qInfo().noquote() << "ANISPAPER_GAMING_BUS unavailable: no session bus;"
+                        << "fullscreen pause disabled";
+      return;
+    }
+    gamingAdaptor_ = new GamingDbusAdaptor(renderers_, this);
+    if (!bus.registerObject(QStringLiteral("/Gaming"), gamingAdaptor_,
+                            QDBusConnection::ExportAllSlots)) {
+      qWarning().noquote() << "ANISPAPER_GAMING_BUS could not export /Gaming";
+      return;
+    }
+    if (!bus.registerService(QStringLiteral("org.anispaper.Daemon"))) {
+      qWarning().noquote()
+          << "ANISPAPER_GAMING_BUS could not own org.anispaper.Daemon"
+          << bus.lastError().message();
+      return;
+    }
+    qInfo().noquote() << "ANISPAPER_GAMING_BUS ready on org.anispaper.Daemon /Gaming";
+  }
+
   void applyScan(ScanResult result) {
     QList<QJsonValue> ordered;
     for (const auto &value : result.items) ordered << value;
@@ -1585,6 +1641,7 @@ class Daemon : public QObject {
   Watcher watcher_;
   QThreadPool pool_;
   RendererManager *renderers_ = nullptr;
+  GamingDbusAdaptor *gamingAdaptor_ = nullptr;
   QHash<QString, QProcess *> steamInstalls_;
   bool scanning_ = false;
   bool queuedRefresh_ = false;
@@ -1639,3 +1696,7 @@ int main(int argc, char **argv) {
   ::close(shutdownPipe[1]);
   return result;
 }
+
+// GamingDbusAdaptor's Q_OBJECT lives in this translation unit (the daemon is a
+// single .cpp), so its moc output is included here.
+#include "main.moc"

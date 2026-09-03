@@ -21,7 +21,6 @@ class FrameImageProvider final : public QQuickImageProvider {
     quint64 frameNo = 0;
     bool resetPending = false;
     std::shared_ptr<MappedRegion> mapping;
-    QSize requestedSize;
   };
 
   QImage fallback(const QSize &requestedSize) const;

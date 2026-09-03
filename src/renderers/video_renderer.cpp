@@ -4,6 +4,7 @@
 
 #include <QDateTime>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
 #include <QOpenGLFramebufferObject>
@@ -22,6 +23,21 @@ QString mpvError(int code) {
   const char *text = mpv_error_string(code);
   return QStringLiteral("libmpv: %1").arg(QString::fromUtf8(text ? text : "error"));
 }
+
+// libmpv VAAPI zero-copy needs the native Wayland display (EGL), not just a
+// GL context.  Qt's offscreen surface on the wayland QPA plugin already owns
+// one; passing it via MPV_RENDER_PARAM_WL_DISPLAY is what makes hwdec=vaapi
+// succeed instead of silently staying on vaapi-copy.
+void *waylandNativeDisplay() {
+  if (!qGuiApp) {
+    return nullptr;
+  }
+  if (auto *wayland =
+          qGuiApp->nativeInterface<QNativeInterface::QWaylandApplication>()) {
+    return wayland->display();
+  }
+  return nullptr;
+}
 }  // namespace
 
 VideoRenderer::VideoRenderer(RendererSpec spec, QObject *parent)
@@ -33,6 +49,11 @@ VideoRenderer::VideoRenderer(RendererSpec spec, QObject *parent)
   // PBO readback if the event path went quiet (decoder slower than the cap).
   frameTimer_.setInterval(200);
   connect(&frameTimer_, &QTimer::timeout, this, &VideoRenderer::renderFrame);
+  // Re-arm timer for the pacing guard: one reusable single-shot instead of a
+  // fresh QTimer::singleShot allocation per early callback.
+  paceTimer_.setTimerType(Qt::PreciseTimer);
+  paceTimer_.setSingleShot(true);
+  connect(&paceTimer_, &QTimer::timeout, this, &VideoRenderer::renderFrame);
 }
 
 VideoRenderer::~VideoRenderer() { stop(); }
@@ -131,22 +152,37 @@ bool VideoRenderer::start(QString *error) {
   // ("no", "vaapi", "nvdec", "auto-safe", ...) overrides the probe for testing.
   const GpuVendor vendor = detectGpuVendor();
   const QByteArray overrideValue = qgetenv("ANISPAPER_VIDEO_HWDEC").trimmed();
-  const QByteArray hwdecMethod = !overrideValue.isEmpty()
-                                     ? overrideValue
-                                     : recommendedVideoHwdec(vendor).toLatin1();
+  void *wlDisplay = waylandNativeDisplay();
+  QByteArray hwdecMethod = !overrideValue.isEmpty()
+                               ? overrideValue
+                               : recommendedVideoHwdec(vendor).toLatin1();
+  // recommendedVideoHwdec returns vaapi-copy because Qt offscreen GL without
+  // a native display cannot import VAAPI surfaces.  When we do have the
+  // Wayland display, try zero-copy first and keep copy as mpv's fallback so
+  // a failed interop cannot drop us into software 4K decode.
+  if (overrideValue.isEmpty() && wlDisplay && hwdecMethod == "vaapi-copy") {
+    hwdecMethod = "vaapi,vaapi-copy";
+  }
   if (result >= 0) result = setOption("hwdec", hwdecMethod.constData());
   if (result >= 0) result = setOption("hwdec-codecs", "all");
-  // 4K sources render at the output size: mpv's GL renderer scales decoded
-  // frames with GPU shaders when it composites into our FBO, so no video
-  // filter is needed.  (A lavfi scale filter here would run swscale on the
-  // CPU -- measured 124% for one 4K->1080p stream at 30 fps.)  The vaapi
-  // -copy download still moves source-sized frames, which is a plain DMA
-  // transfer the memory bus absorbs easily at 30 fps.
-  // The frame timer renders at the effective wallpaper fps (usually the
-  // 20 fps cap), while mpv's decoder otherwise runs at the file's native
-  // rate (60 for most workshop videos).  Letting the decoder skip frames
-  // the render context will never show cuts the vaapi-copy GPU->RAM
-  // download to the displayed rate instead of the native one.
+  // 1:1 blit shaders.  scale_vaapi (VPP, mode=hq) already produced an
+  // output-sized VAAPI surface, so the 3D engine is not downscaling 4K.
+  // bilinear is the right 1:1 filter; the softness bug was a 640x480 FBO.
+  if (result >= 0) result = setOption("scale", "bilinear");
+  if (result >= 0) result = setOption("dscale", "bilinear");
+  if (result >= 0) result = setOption("cscale", "bilinear");
+  if (result >= 0) result = setOption("dither", "no");
+  if (result >= 0) result = setOption("interpolation", "no");
+  if (result >= 0) result = setOption("deband", "no");
+  if (result >= 0) result = setOption("correct-downscaling", "no");
+  if (result >= 0) result = setOption("linear-downscaling", "no");
+  if (result >= 0) result = setOption("sigmoid-upscaling", "no");
+  if (result >= 0) result = setOption("hdr-compute-peak", "no");
+  if (result >= 0) result = setOption("fbo-format", "rgba8");
+  if (result >= 0) result = setOption("vd-lavc-dr", "yes");
+  // Decoder skip still matters for the vaapi-copy fallback: without it the
+  // GPU->RAM download runs at the file's native 60 fps even when the
+  // wallpaper cap is lower.  At fpsCap=60 this is a no-op besides VO drops.
   if (result >= 0) result = setOption("framedrop", "decoder+vo");
 
   if (result >= 0) result = mpv_initialize(mpv_);
@@ -162,12 +198,17 @@ bool VideoRenderer::start(QString *error) {
   mpv_opengl_init_params glInit{};
   glInit.get_proc_address = &VideoRenderer::getProcAddress;
   glInit.get_proc_address_ctx = context_.get();
-  mpv_render_param params[] = {
-      {MPV_RENDER_PARAM_API_TYPE,
-       const_cast<char *>(MPV_RENDER_API_TYPE_OPENGL)},
-      {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &glInit},
-      {MPV_RENDER_PARAM_INVALID, nullptr},
-  };
+  mpv_render_param params[5];
+  int paramCount = 0;
+  params[paramCount++] = {MPV_RENDER_PARAM_API_TYPE,
+                          const_cast<char *>(MPV_RENDER_API_TYPE_OPENGL)};
+  params[paramCount++] = {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &glInit};
+  if (wlDisplay) {
+    // Mesa VAAPI EGL interop (see mpv render_gl.h): without this, hwdec=vaapi
+    // fails and we stay on vaapi-copy of source-sized frames.
+    params[paramCount++] = {MPV_RENDER_PARAM_WL_DISPLAY, wlDisplay};
+  }
+  params[paramCount++] = {MPV_RENDER_PARAM_INVALID, nullptr};
   result = mpv_render_context_create(&renderContext_, mpv_, params);
   if (result < 0) {
     context_->doneCurrent();
@@ -200,10 +241,12 @@ bool VideoRenderer::start(QString *error) {
       reinterpret_cast<const char *>(functions->glGetString(GL_RENDERER));
   initializeAsyncReadback();
   ::fprintf(stderr,
-            "anispaper video: gpu-probe=%s gl-renderer=%s hwdec=%s%s readback=%s\n",
+            "anispaper video: gpu-probe=%s gl-renderer=%s hwdec=%s%s "
+            "wl-display=%s readback=%s\n",
             gpuVendorId(vendor).toLatin1().constData(),
             glRenderer ? glRenderer : "unknown", hwdecMethod.constData(),
             overrideValue.isEmpty() ? "" : " (override)",
+            wlDisplay ? "yes" : "no",
             asyncReadback_ ? "async-pbo" : "sync");
   ::fflush(stderr);
 
@@ -221,6 +264,7 @@ bool VideoRenderer::start(QString *error) {
   failed_ = false;
   frameCount_ = 0;
   sourceRateConfigured_ = false;
+  outputScaleFilterAdded_ = false;
   fpsEpochMs_ = QDateTime::currentMSecsSinceEpoch();
   frameTimer_.start();  // 200 ms keepalive (see constructor)
   return true;
@@ -228,6 +272,7 @@ bool VideoRenderer::start(QString *error) {
 
 void VideoRenderer::stop() {
   frameTimer_.stop();
+  paceTimer_.stop();
   running_ = false;
   paused_ = false;
   framePending_.store(false, std::memory_order_release);
@@ -262,6 +307,7 @@ void VideoRenderer::pause() {
     return;
   }
   paused_ = true;
+  paceTimer_.stop();
   // mpv freezes on its pause property; the frame timer stays armed so the
   // watchdog still observes renderer liveness while nothing is decoded.
   mpv_set_property_string(mpv_, "pause", "yes");
@@ -273,6 +319,10 @@ void VideoRenderer::resume() {
   }
   paused_ = false;
   framePending_.store(true, std::memory_order_release);
+  // Drop the stale grid: a deadline computed before the pause is arbitrarily
+  // far in the past, and advancing from it would replay every missed slot as a
+  // burst of renders.  The next callback re-anchors the grid.
+  nextDeadlineNs_ = 0;
   mpv_set_property_string(mpv_, "pause", "no");
 }
 
@@ -479,23 +529,39 @@ void VideoRenderer::renderFrame() {
       !renderContext_) {
     return;
   }
-  // Rate ceiling with absolute-deadline pacing.  Renders are event-driven:
-  // mpv's update callback queues this slot the moment a frame is decoded.
-  // Each render anchors the NEXT one to now + interval (a fixed grid), so a
-  // late callback is postponed to the exact grid slot instead of dropping
+  // Rate ceiling with absolute-deadline pacing on a monotonic clock.  Renders
+  // are event-driven: mpv's update callback queues this slot the moment a frame
+  // is decoded.  Each render anchors the NEXT one to a fixed nanosecond grid,
+  // so a late callback is postponed to its exact slot instead of dropping
   // (which collapsed the rate to timer multiples) or firing early (jitter).
-  const qint64 now = QDateTime::currentMSecsSinceEpoch();
-  const qint64 intervalMs =
-      qMax<qint64>(1, qRound(1000.0 / qBound(1, effectiveFps(), 60)));
-  const qint64 sinceLast = now - lastRenderMs_;
-  if (sinceLast >= 0 && sinceLast < intervalMs) {
-    // Too soon: re-schedule at the exact remainder (the grid slot), never
-    // drop — dropping collapses the rate; the repost keeps the cadence.
-    QTimer::singleShot(static_cast<int>(intervalMs - sinceLast), this,
-                       [this] { renderFrame(); });
+  //
+  // The grid is nanoseconds, not milliseconds, because a millisecond grid
+  // cannot express 60 fps: round(1000/60) is 17 ms, capping playback at
+  // 58.8 fps and beating slowly against a 16.67 ms source.  The clock is
+  // monotonic for the same reason the deadline is absolute -- wall-clock
+  // adjustments (NTP, suspend/resume) must not stall or burst the wallpaper.
+  if (!pacingClock_.isValid()) {
+    pacingClock_.start();
+  }
+  const qint64 nowNs = pacingClock_.nsecsElapsed();
+  const qint64 intervalNs = 1000000000LL / qBound(1, effectiveFps(), 60);
+  if (nextDeadlineNs_ > 0 && nowNs < nextDeadlineNs_) {
+    // Too soon: re-arm for the remainder of this slot, never drop -- dropping
+    // collapses the rate; the repost keeps the cadence.  Rounding up keeps the
+    // timer from firing before the deadline and re-posting in a tight loop.
+    const qint64 remainingNs = nextDeadlineNs_ - nowNs;
+    const int waitMs = static_cast<int>((remainingNs + 999999LL) / 1000000LL);
+    if (!paceTimer_.isActive()) {
+      paceTimer_.start(qMax(1, waitMs));
+    }
     return;
   }
-  lastRenderMs_ = now;
+  // Advance on the grid so per-frame scheduling error cannot accumulate, but
+  // resync when we are more than one full interval late (a stall, a resumed
+  // session): replaying the missed slots back-to-back would burst frames.
+  nextDeadlineNs_ = nowNs - nextDeadlineNs_ > intervalNs
+                        ? nowNs + intervalNs
+                        : nextDeadlineNs_ + intervalNs;
   // The exchange stays as the decode gate for the heavy path: without a new
   // mpv frame there is nothing to render, but the PBO ring may hold a matured
   // readback worth publishing (see the !haveFrame branch below).
@@ -666,6 +732,24 @@ void VideoRenderer::pumpEvents() {
       char *active = mpv_get_property_string(mpv_, "hwdec-current");
       ::fprintf(stderr, "anispaper video: hwdec-current=%s\n", active ? active : "no");
       ::fflush(stderr);
+      // Zero-copy VAAPI still feeds the GL renderer source-sized textures.
+      // scale_vaapi runs on the VCN/VPP block and leaves the 3D engine with a
+      // 1:1 blit into our output-sized FBO.  Only attach it when the decoder
+      // actually produced VAAPI surfaces -- on vaapi-copy the frames are
+      // already in RAM and this filter would fail to configure.
+      if (active && std::strcmp(active, "vaapi") == 0 && !outputScaleFilterAdded_ &&
+          spec_.width >= 64 && spec_.height >= 64) {
+        const QByteArray vf = QByteArrayLiteral("scale_vaapi=w=") +
+                              QByteArray::number(spec_.width) + ":h=" +
+                              QByteArray::number(spec_.height) +
+                              QByteArrayLiteral(":mode=hq");
+        const char *cmd[] = {"vf", "add", vf.constData(), nullptr};
+        const int vfResult = mpv_command(mpv_, cmd);
+        outputScaleFilterAdded_ = vfResult >= 0;
+        ::fprintf(stderr, "anispaper video: vf %s -> %d\n", vf.constData(),
+                  vfResult);
+        ::fflush(stderr);
+      }
       if (active) {
         mpv_free(active);
       }
@@ -679,5 +763,6 @@ void VideoRenderer::fail(const QString &reason) {
   }
   failed_ = true;
   frameTimer_.stop();
+  paceTimer_.stop();
   emit fatal(reason);
 }

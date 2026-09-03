@@ -93,6 +93,11 @@ class PreviewSchemeHandler : public QWebEngineUrlSchemeHandler {
     auto *buffer = new QBuffer(job);
     buffer->setData(jpeg);
     buffer->open(QIODevice::ReadOnly);
+    // No Cache-Control here on purpose: adding one broke preview delivery for
+    // this custom scheme (Chromium stopped painting the thumbnails at all).
+    // The C++ QCache above already removes the repeated decode+encode cost,
+    // and the JS side no longer recreates <img> nodes on a timer, which is
+    // where the real per-second churn came from.
     job->reply(QByteArrayLiteral("image/jpeg"), buffer);
   }
 };

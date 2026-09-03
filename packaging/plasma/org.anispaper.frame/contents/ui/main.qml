@@ -22,6 +22,16 @@ WallpaperItem {
     // instead of on a fixed GUI timer that re-uploads every tick.
     // `real` keeps the 64-bit sequence exact past 2^31 frames.
     readonly property real frameNo: watcher.frameNo
+    // Native FrameHeader geometry, read from the bridge header by the watcher.
+    // Deriving it from bridgeImage.implicitWidth (as this did before) is both a
+    // binding cycle -- sourceClipRect defines the implicit size -- and wrong at
+    // startup, where the implicit size belongs to the provider's 1280x720
+    // fallback and produced a visibly stretched first paint.
+    readonly property bool frameReady: watcher.frameWidth > 0 && watcher.frameHeight > 0
+    readonly property real frameWidth: frameReady ? watcher.frameWidth : Math.max(1, width)
+    readonly property real frameHeight: frameReady ? watcher.frameHeight : Math.max(1, height)
+    readonly property real frameAspect: frameWidth / frameHeight
+    readonly property real itemAspect: width > 0 && height > 0 ? width / height : frameAspect
     // The image provider exposes the native FrameHeader dimensions.  Never
     // implicitly stretch that frame to a logical-size WallpaperItem: calculate
     // source and destination rectangles from both aspect ratios instead.
@@ -29,18 +39,15 @@ WallpaperItem {
         const requested = String(root.configuration.ScaleMode || "cover").trim().toLowerCase()
         return requested === "fit" || requested === "stretch" ? requested : "cover"
     }
-    readonly property real frameWidth: bridgeImage.implicitWidth > 0
-                                       ? bridgeImage.implicitWidth : Math.max(1, width)
-    readonly property real frameHeight: bridgeImage.implicitHeight > 0
-                                        ? bridgeImage.implicitHeight : Math.max(1, height)
-    readonly property real frameAspect: frameWidth / frameHeight
-    readonly property real itemAspect: width > 0 && height > 0 ? width / height : frameAspect
 
     // cover crops source pixels around the centre; fit letterboxes on the
     // #0A0D14 backdrop; stretch is the only deliberate non-aspect mode.
+    // Before the first real frame the clip rect stays null so the provider's
+    // fallback is shown through PreserveAspectCrop at its own aspect ratio.
     readonly property rect sourceRect: {
-        if (scaleMode !== "cover" || frameWidth <= 0 || frameHeight <= 0 || itemAspect <= 0)
-            return Qt.rect(0, 0, frameWidth, frameHeight)
+        if (!frameReady || scaleMode !== "cover" || frameWidth <= 0 || frameHeight <= 0
+                || itemAspect <= 0)
+            return Qt.rect(0, 0, 0, 0)
         if (frameAspect > itemAspect) {
             const cropWidth = frameHeight * itemAspect
             return Qt.rect((frameWidth - cropWidth) / 2, 0, cropWidth, frameHeight)
@@ -49,7 +56,7 @@ WallpaperItem {
         return Qt.rect(0, (frameHeight - cropHeight) / 2, frameWidth, cropHeight)
     }
     readonly property rect destRect: {
-        if (scaleMode === "cover" || scaleMode === "stretch" ||
+        if (!frameReady || scaleMode === "cover" || scaleMode === "stretch" ||
                 frameWidth <= 0 || frameHeight <= 0 || width <= 0 || height <= 0)
             return Qt.rect(0, 0, width, height)
         const factor = Math.min(width / frameWidth, height / frameHeight)
@@ -75,10 +82,15 @@ WallpaperItem {
             width: root.destRect.width
             height: root.destRect.height
             sourceClipRect: root.sourceRect
-            // sourceRect/destRect preserve the ratio for cover and fit.  This
-            // fill mode is therefore only a true stretch when explicitly
-            // selected above.
-            fillMode: Image.Stretch
+            // sourceRect/destRect preserve the ratio for cover and fit, so
+            // Stretch is only a true stretch when the user selected it.  Until
+            // the first bridge frame arrives there is no clip rect and the
+            // source is the provider's own-aspect fallback: stretching that to
+            // the item is exactly the startup distortion, so crop instead.
+            fillMode: root.frameReady ? Image.Stretch : Image.PreserveAspectCrop
+            // Bridge frames arrive at native output resolution and are drawn at
+            // (or below) 1:1, so mipmapping is pure cost and linear filtering is
+            // all the scene graph needs.
             smooth: true
             mipmap: false
             cache: false

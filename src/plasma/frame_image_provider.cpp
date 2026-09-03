@@ -94,26 +94,14 @@ QImage FrameImageProvider::requestImage(const QString &id, QSize *size,
     cached.image = fallback(requestedSize);
   }
 
-  // QML supplies the actual item size for image providers.  Keep the bridge
-  // at physical output resolution, but avoid uploading a larger texture than
-  // the WallpaperItem can display.  This is an aspect-preserving, smooth
-  // downsample; cover/fit source-rectangle math in QML still operates on the
-  // same aspect ratio and explicit stretch remains the only distortion mode.
-  if (requestedSize.isValid() && requestedSize.width() > 0 &&
-      requestedSize.height() > 0 && !cached.image.isNull()) {
-    const QSize target = requestedSize;
-    if (cached.requestedSize != target ||
-        (cached.image.width() > target.width() &&
-         cached.image.height() > target.height())) {
-      if (cached.image.width() > target.width() ||
-          cached.image.height() > target.height()) {
-        cached.image = cached.image.scaled(target, Qt::KeepAspectRatio,
-                                           Qt::SmoothTransformation);
-      }
-      cached.requestedSize = target;
-    }
-  }
-
+  // No CPU rescale here.  The provider used to downsample the frame to the
+  // WallpaperItem's logical size with a SmoothTransformation, which at 1080p
+  // and 60 fps is a multi-megabyte CPU filter per frame inside plasmashell --
+  // and under fractional scaling (1920x1080 physical -> 1423x800 logical) it
+  // ran on *every* frame.  The scene graph already scales the texture on the
+  // GPU for free, and QML's sourceClipRect/geometry math owns the cover/fit
+  // policy, so handing over native bridge pixels is both cheaper and the only
+  // way the aspect ratio stays exact.
   if (size) *size = cached.image.size();
   return cached.image;
 }

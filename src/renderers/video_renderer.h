@@ -4,6 +4,7 @@
 #include "shm_frame_transport.h"
 
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <QSize>
 #include <QTimer>
 
@@ -76,6 +77,11 @@ class VideoRenderer final : public Renderer {
   mpv_handle *mpv_ = nullptr;
   mpv_render_context *renderContext_ = nullptr;
   QTimer frameTimer_;
+  // Single-shot re-arm used by the pacing guard when a decode callback lands
+  // inside the current grid slot.  A reused timer (instead of a per-frame
+  // QTimer::singleShot lambda) keeps 60 renders/second from allocating 60
+  // timer objects and closures.
+  QTimer paceTimer_;
   QImage frame_;
   QByteArray flipScratch_;
   bool running_ = false;
@@ -87,6 +93,7 @@ class VideoRenderer final : public Renderer {
   double fps_ = 0.0;
   bool sourceRateConfigured_ = false;
   int nativeFps_ = 60;
+  bool outputScaleFilterAdded_ = false;
 
   // GL 3.2+ fence/mmap entry points, resolved once from the context.  The
   // offscreen surface requests a 2.1 profile, so the versioned Qt function
@@ -116,7 +123,10 @@ class VideoRenderer final : public Renderer {
   QSize readbackSize_;
   // Non-owning direct-publish transport (see setFrameTransport).
   ShmFrameTransport *frameTransport_ = nullptr;
-  // Wall-clock of the last completed render, driving the event-driven rate
-  // ceiling in renderFrame (see the pacing guard).
-  qint64 lastRenderMs_ = -100000;
+  // Monotonic pacing grid for renderFrame's rate ceiling.  Nanoseconds because
+  // a millisecond grid cannot represent 60 fps (16.67 ms rounds to 17 ms, i.e.
+  // 58.8 fps); absolute deadlines because per-frame "now + interval" lets
+  // scheduling error accumulate.
+  QElapsedTimer pacingClock_;
+  qint64 nextDeadlineNs_ = 0;
 };
