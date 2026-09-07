@@ -5,6 +5,7 @@
 #include <QDateTime>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QtGlobal>
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
 #include <QOpenGLFramebufferObject>
@@ -32,10 +33,12 @@ void *waylandNativeDisplay() {
   if (!qGuiApp) {
     return nullptr;
   }
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
   if (auto *wayland =
           qGuiApp->nativeInterface<QNativeInterface::QWaylandApplication>()) {
     return wayland->display();
   }
+#endif
   return nullptr;
 }
 }  // namespace

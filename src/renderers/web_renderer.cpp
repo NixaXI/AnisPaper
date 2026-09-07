@@ -10,11 +10,16 @@
 #include <QPainter>
 #include <QPointer>
 #include <QPixmap>
+#include <QtGlobal>
 #include <QUrl>
 #include <QWebEngineDownloadRequest>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 2, 0)
 #include <QWebEngineNewWindowRequest>
+#endif
 #include <QWebEnginePage>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
 #include <QWebEnginePermission>
+#endif
 #include <QWebEngineProfile>
 #include <QWebEngineScript>
 #include <QWebEngineScriptCollection>
@@ -166,7 +171,9 @@ bool WebRenderer::start(QString *error) {
   profile_->setPersistentCookiesPolicy(QWebEngineProfile::NoPersistentCookies);
   profile_->setHttpCacheType(QWebEngineProfile::NoCache);
   profile_->setSpellCheckEnabled(false);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
   profile_->setPushServiceEnabled(false);
+#endif
   auto *interceptor =
       new SandboxInterceptor(canonicalDirPrefix(spec_.file), profile_.get());
   profile_->setUrlRequestInterceptor(interceptor);
@@ -181,10 +188,21 @@ bool WebRenderer::start(QString *error) {
   view_->resize(spec_.width, spec_.height);
   view_->setAttribute(Qt::WA_DontShowOnScreen, true);
   page->setBackgroundColor(Qt::black);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
   QObject::connect(page, &QWebEnginePage::permissionRequested, this,
                    [](QWebEnginePermission permission) { permission.deny(); });
+#else
+  QObject::connect(
+      page, &QWebEnginePage::featurePermissionRequested, this,
+      [page](const QUrl &securityOrigin, QWebEnginePage::Feature feature) {
+        page->setFeaturePermission(securityOrigin, feature,
+                                   QWebEnginePage::PermissionDeniedByUser);
+      });
+#endif
+#if QT_VERSION >= QT_VERSION_CHECK(6, 2, 0)
   QObject::connect(page, &QWebEnginePage::newWindowRequested, this,
                    [](QWebEngineNewWindowRequest &) {});
+#endif
 
   auto *settings = view_->settings();
   settings->setAttribute(QWebEngineSettings::JavascriptEnabled, true);
