@@ -6,7 +6,7 @@
     "Description": "AnisPaper wallpaper bridge",
     "Icon": "preferences-desktop-wallpaper",
     "License": "MIT",
-    "Version": "0.1.0",
+    "Version": "0.2.0",
     "Category": ""
   },
   "X-KDE-ParentApp": "org.kde.plasmashell"
