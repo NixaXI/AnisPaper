@@ -13,7 +13,9 @@
 #include <QSet>
 #include <QStringList>
 #include <QTimer>
+#include <QVariant>
 #include <QVariantList>
+#include <QVariantMap>
 #include <functional>
 
 class QDialog;
@@ -40,6 +42,7 @@ class RpcClient : public QObject {
   Q_PROPERTY(QString measuredFps READ measuredFps NOTIFY measuredFpsChanged)
   Q_PROPERTY(QVariantList liveRenderers READ liveRenderers NOTIFY liveRenderersChanged)
   Q_PROPERTY(bool gamingActive READ gamingActive NOTIFY gamingActiveChanged)
+  Q_PROPERTY(QString gamingMode READ gamingMode NOTIFY gamingModeChanged)
   Q_PROPERTY(bool workshopBusy READ workshopBusy NOTIFY workshopBusyChanged)
   Q_PROPERTY(QString workshopError READ workshopError NOTIFY workshopErrorChanged)
   Q_PROPERTY(QVariantList workshopItems READ workshopItems NOTIFY workshopItemsChanged)
@@ -74,6 +77,7 @@ class RpcClient : public QObject {
   QString measuredFps() const { return measuredFps_; }
   QVariantList liveRenderers() const { return liveRenderers_; }
   bool gamingActive() const { return gamingActive_; }
+  QString gamingMode() const { return gamingMode_; }
   bool workshopBusy() const { return workshopBusy_; }
   QString workshopError() const { return workshopError_; }
   QVariantList workshopItems() const { return workshopItems_; }
@@ -101,9 +105,14 @@ class RpcClient : public QObject {
   Q_INVOKABLE void refreshCatalog();
   Q_INVOKABLE void dismissToast();
   Q_INVOKABLE QVariantList catalogItems() const;
+  Q_INVOKABLE QVariantMap itemProperties(const QString &id) const;
   Q_INVOKABLE void applyWallpaper(const QString &id, const QString &output);
   Q_INVOKABLE void stopWallpaper(const QString &output);
   Q_INVOKABLE void setGamingMode(const QString &mode);
+  Q_INVOKABLE void setWallpaperProperties(const QString &id, const QVariantMap &values);
+  Q_INVOKABLE void setWallpaperProperty(const QString &id, const QString &key,
+                                        const QVariant &value);
+  Q_INVOKABLE QVariantList wallpaperPropertyRows(const QString &id) const;
   Q_INVOKABLE void openExternal(const QString &url);
   Q_INVOKABLE void searchWorkshop(const QString &query, int page, const QString &ratings);
   Q_INVOKABLE void subscribeWorkshop(const QString &publishedFileId);
@@ -127,6 +136,7 @@ class RpcClient : public QObject {
   void measuredFpsChanged();
   void liveRenderersChanged();
   void gamingActiveChanged();
+  void gamingModeChanged();
   void catalogChanged();
   void workshopBusyChanged();
   void workshopErrorChanged();
@@ -196,6 +206,7 @@ class RpcClient : public QObject {
   QString measuredFps_ = QStringLiteral("— fps");
   QVariantList liveRenderers_;
   bool gamingActive_ = false;
+  QString gamingMode_ = QStringLiteral("auto");
   QNetworkAccessManager http_;
   bool workshopBusy_ = false;
   QString workshopError_;

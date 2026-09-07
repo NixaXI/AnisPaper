@@ -330,6 +330,7 @@ img{display:block;max-width:100%}
   font-family:var(--display);font-weight:700;font-size:10px;letter-spacing:.14em;
   color:var(--cream-faint);border:1px solid var(--line);
 }
+.outs{display:flex;align-items:center;gap:6px;max-width:360px;overflow-x:auto;scrollbar-width:thin}
 .out.on{color:var(--cream);border-color:var(--pink-line);background:var(--pink-dim)}
 .out .sub{display:block;font-size:7px;letter-spacing:.16em;color:var(--cream-faint);margin-top:-1px;font-weight:600}
 .out.on .sub{color:var(--cyan)}
@@ -418,6 +419,25 @@ img{display:block;max-width:100%}
 }
 .knob.on{background:rgba(228,90,154,.55)}
 .knob.on i{transform:translateX(18px)}
+.sheet-props{
+  top:88px;right:16px;bottom:96px;width:360px;border-radius:16px;
+  padding:22px 22px 16px;transform:translateX(20px);
+  overflow:auto;
+}
+.sheet-props.open{transform:translateX(0)}
+.prop-row{padding:12px 0;border-bottom:1px solid var(--line)}
+.prop-row:last-child{border-bottom:0}
+.prop-row .lb{font-family:var(--display);font-weight:700;font-size:12px;letter-spacing:.03em}
+.prop-row .val{font-size:11px;color:var(--cream-faint);margin-top:4px}
+.prop-row input[type=range]{width:100%;margin-top:8px}
+.prop-row select,.prop-row input[type=text],.prop-row input[type=color]{
+  width:100%;margin-top:8px;background:rgba(247,244,240,.08);
+  border:1px solid var(--line);color:var(--cream);border-radius:8px;padding:8px 10px;
+  font:inherit;
+}
+.prop-empty{margin-top:16px;font-size:13px;color:var(--cream-faint);line-height:1.45}
+#props{display:none}
+#props.has{display:inline-flex}
 
 /* toasts + curtain veil */
 #toasts{position:fixed;top:22px;right:22px;z-index:80;display:flex;flex-direction:column;gap:8px}
@@ -519,9 +539,31 @@ body.lib-open .stage-art{visibility:hidden;pointer-events:none}
 .lib-grid{
   flex:1;min-width:0;overflow-y:auto;overflow-x:hidden;
   display:grid;grid-template-columns:repeat(auto-fill,minmax(198px,1fr));
-  gap:12px;align-content:start;
+  gap:14px;align-content:start;align-items:start;
   padding:16px 16px 22px;
   scrollbar-width:thin;scrollbar-color:rgba(247,244,240,.16) transparent;
+}
+#wsGrid{
+  grid-template-columns:repeat(auto-fill,minmax(168px,1fr));
+  grid-auto-rows:auto;
+  gap:8px;
+  align-items:stretch;
+}
+.gcard.ws{
+  aspect-ratio:16/10;
+  height:auto;
+  display:block;
+  width:100%;
+  max-width:100%;
+  transform:none;
+  isolation:isolate;
+  z-index:0;
+  overflow:hidden;
+}
+.gcard.ws:hover{
+  transform:none;
+  z-index:0;
+  border-color:rgba(247,244,240,.35);
 }
 .lib-empty{
   grid-column:1/-1;padding:40px 8px;
@@ -535,10 +577,9 @@ body.lib-open .stage-art{visibility:hidden;pointer-events:none}
   border:1px solid var(--line);cursor:pointer;text-align:left;
   transform:translateY(0);opacity:.96;
   background:#12161a;
-  contain:strict;content-visibility:auto;
   transition:transform var(--t) var(--eo), opacity var(--t) var(--eo), border-color var(--t) var(--eo);
 }
-.gcard:hover{transform:translateY(-3px);opacity:1;border-color:rgba(247,244,240,.22)}
+.gcard:hover:not(.ws){transform:translateY(-3px);opacity:1;border-color:rgba(247,244,240,.22)}
 .gcard.on{border-color:var(--pink);box-shadow:0 0 0 1px var(--pink)}
 .gcard.ws-have{border-color:rgba(122,215,240,.35)}
 .gcard .thumb{position:absolute;inset:0;background:#121c22}
@@ -546,6 +587,49 @@ body.lib-open .stage-art{visibility:hidden;pointer-events:none}
   position:absolute;inset:0;width:100%;height:100%;
   object-fit:cover;object-position:center 30%;
   display:block;pointer-events:none;z-index:0;border:0;
+}
+.gcard.ws .thumb{
+  position:absolute;inset:0;width:auto;aspect-ratio:auto;flex:none;
+  overflow:hidden;min-height:0;
+}
+.gcard.ws .thumb img{
+  object-fit:cover;
+  object-position:center center;
+}
+.gcard.ws .scrim{
+  display:block;
+  height:42%;
+  background:linear-gradient(180deg, transparent, rgba(0,0,0,.88));
+}
+.gcard.ws .info{
+  position:absolute;left:0;right:0;bottom:0;
+  flex:none;
+  padding:8px 8px 7px;
+  min-height:0;
+  background:transparent;
+}
+.gcard.ws .info .ttl{
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  display:block;
+  -webkit-line-clamp:unset;
+  -webkit-box-orient:unset;
+  line-height:1.2;
+  font-size:11px;
+  color:#fff;
+  text-shadow:0 1px 8px rgba(0,0,0,.85);
+}
+.gcard.ws .info .typ,
+.gcard.ws .info .meta2{display:none}
+.gcard.ws .sub-btn{
+  position:absolute;
+  top:6px;
+  right:6px;
+  margin:0;
+  height:20px;
+  padding:0 8px;
+  font-size:8px;
 }
 .gcard .thumb .mark{
   position:absolute;inset:0;z-index:2;display:grid;place-items:center;
@@ -692,8 +776,9 @@ body.lib-open .stage-art{visibility:hidden;pointer-events:none}
     </div>
   </div>
   <div class="dock-right">
-    <button class="out on" data-out="DP-2" id="outDP">DP-2<span class="sub">MAIN</span></button>
-    <button class="out" data-out="HDMI" id="outHDMI">HDMI<span class="sub">STANDBY</span></button>
+    <div class="outs" id="outRow">
+      <button class="out on" data-out="DP-2" type="button">DP-2<span class="sub">MAIN</span></button>
+    </div>
     <button class="curtain" id="curtain">CURTAIN</button>
     <button class="shine" id="shine">★ SHINE</button>
     <button class="icon-sw on" id="atmo" title="Atmosphere">
@@ -701,6 +786,9 @@ body.lib-open .stage-art{visibility:hidden;pointer-events:none}
     </button>
     <button class="icon-sw g" id="gaming" title="Gaming Mode">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="7" width="18" height="11" rx="3"/><path d="M8 12h2M9 11v2M15.5 11.5h.01M17.5 13h.01"/></svg>
+    </button>
+    <button class="icon-sw" id="props" title="Wallpaper options">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h10M4 17h13"/><circle cx="18" cy="12" r="2"/><circle cx="15" cy="17" r="2"/></svg>
     </button>
   </div>
 </footer>
@@ -720,7 +808,7 @@ body.lib-open .stage-art{visibility:hidden;pointer-events:none}
       <button class="knob on" id="knobAtmo"><i></i></button>
     </div>
     <div class="tog">
-      <div><div class="lb">Gaming Mode</div><div class="ds">Dim the stage while you play</div></div>
+      <div><div class="lb">Gaming Mode</div><div class="ds">Pause wallpapers when a game is running</div></div>
       <button class="knob" id="knobGame"><i></i></button>
     </div>
     <div class="tog">
@@ -730,6 +818,12 @@ body.lib-open .stage-art{visibility:hidden;pointer-events:none}
   </div>
 </aside>
 
+
+<aside class="sheet sheet-set sheet-props" id="propsSheet">
+  <h2>Wallpaper options</h2>
+  <p class="sub" id="propsSub">This cue has no extra controls</p>
+  <div id="propsRows"></div>
+</aside>
 
 <aside class="sheet sheet-lib" id="searchSheet" role="dialog" aria-label="Catalog search">
   <div class="sheet-chrome">
@@ -909,6 +1003,145 @@ function renderStrip(){
   });
 }
 
+function propLabel(key, prop){
+  let text=String((prop && prop.text) || key);
+  text=text.replace(/<[^>]+>/g," ").replace(/ui_/g,"").replace(/_/g," ").replace(/\s+/g," ").trim();
+  return text || key;
+}
+function weToHex(value){
+  const parts=String(value||"").trim().split(/\s+/);
+  if(parts.length<3) return "#ffffff";
+  const c=n=>{
+    const v=Math.round(Math.min(1,Math.max(0,Number(n)||0))*255);
+    return ("0"+v.toString(16)).slice(-2);
+  };
+  return "#"+c(parts[0])+c(parts[1])+c(parts[2]);
+}
+function hexToWe(hex){
+  const n=parseInt(String(hex||"#ffffff").slice(1),16);
+  if(!Number.isFinite(n)) return "1 1 1";
+  return ((n>>16)&255)/255+" "+((n>>8)&255)/255+" "+(n&255)/255;
+}
+function listedProps(schema){
+  const types={bool:1,slider:1,color:1,combo:1,textinput:1,file:1,directory:1};
+  const rows=[];
+  Object.keys(schema||{}).forEach(key=>{
+    const prop=schema[key];
+    if(!prop || typeof prop!=="object") return;
+    const type=String(prop.type||"");
+    if(!types[type] || prop.hidden) return;
+    rows.push({key, type, prop, order:Number(prop.order)||0});
+  });
+  rows.sort((a,b)=>a.order-b.order || a.key.localeCompare(b.key));
+  return rows;
+}
+let propTimer=null;
+function setPropValue(id, key, value){
+  const it=catalog.find(x=>x.id===id);
+  if(!it) return;
+  if(!it.properties) it.properties={};
+  if(!it.properties[key] || typeof it.properties[key]!=="object") it.properties[key]={};
+  it.properties[key].value=value;
+  clearTimeout(propTimer);
+  propTimer=setTimeout(()=>{
+    if(window.anisOnProp) window.anisOnProp(id, {[key]: value});
+  }, 220);
+}
+function renderProps(){
+  const btn=$("#props");
+  const box=$("#propsRows");
+  const sub=$("#propsSub");
+  const it=catalog.find(x=>x.id===state.selected);
+  const rows=listedProps(it && it.properties);
+  if(btn) btn.classList.toggle("has", rows.length>0);
+  if(!box) return;
+  box.innerHTML="";
+  if(!it || !rows.length){
+    if(sub) sub.textContent="This cue has no extra controls";
+    const empty=document.createElement("p");
+    empty.className="prop-empty";
+    empty.textContent="Wallpaper Engine options appear here when the selected wallpaper defines them.";
+    box.appendChild(empty);
+    return;
+  }
+  if(sub) sub.textContent=it.title+" · "+rows.length+" options";
+  rows.forEach(row=>{
+    const wrap=document.createElement("div");
+    wrap.className="prop-row";
+    const lab=document.createElement("div");
+    lab.className="lb";
+    lab.textContent=propLabel(row.key, row.prop);
+    wrap.appendChild(lab);
+    const value=row.prop.value;
+    if(row.type==="bool"){
+      const knob=document.createElement("button");
+      knob.type="button";
+      knob.className="knob"+(value?" on":"");
+      knob.innerHTML="<i></i>";
+      knob.onclick=()=>{
+        const next=!knob.classList.contains("on");
+        knob.classList.toggle("on", next);
+        setPropValue(it.id, row.key, next);
+      };
+      wrap.appendChild(knob);
+    }else if(row.type==="slider"){
+      const min=Number(row.prop.min); const max=Number(row.prop.max);
+      const lo=Number.isFinite(min)?min:0;
+      const hi=Number.isFinite(max)?max:100;
+      const step=Number(row.prop.step);
+      const input=document.createElement("input");
+      input.type="range";
+      input.min=String(lo);
+      input.max=String(hi);
+      input.step=Number.isFinite(step)&&step>0?String(step):"1";
+      input.value=String(value==null?lo:value);
+      const shown=document.createElement("div");
+      shown.className="val";
+      shown.textContent=input.value;
+      input.oninput=()=>{
+        shown.textContent=input.value;
+        const raw=Number(input.value);
+        setPropValue(it.id, row.key, Number.isFinite(raw)?raw:input.value);
+      };
+      wrap.appendChild(shown);
+      wrap.appendChild(input);
+    }else if(row.type==="color"){
+      const input=document.createElement("input");
+      input.type="color";
+      input.value=weToHex(value);
+      input.oninput=()=>setPropValue(it.id, row.key, hexToWe(input.value));
+      wrap.appendChild(input);
+    }else if(row.type==="combo"){
+      const selectEl=document.createElement("select");
+      (row.prop.options||[]).forEach(opt=>{
+        const option=document.createElement("option");
+        const optValue=opt && typeof opt==="object" ? opt.value : opt;
+        const optLabel=opt && typeof opt==="object" ? (opt.label||opt.text||optValue) : opt;
+        option.value=String(optValue);
+        option.textContent=propLabel(String(optLabel), {text:optLabel});
+        if(String(optValue)===String(value)) option.selected=true;
+        selectEl.appendChild(option);
+      });
+      selectEl.onchange=()=>{
+        const picked=(row.prop.options||[]).find(opt=>{
+          const optValue=opt && typeof opt==="object" ? opt.value : opt;
+          return String(optValue)===selectEl.value;
+        });
+        const raw=picked && typeof picked==="object" ? picked.value : selectEl.value;
+        setPropValue(it.id, row.key, raw);
+      };
+      wrap.appendChild(selectEl);
+    }else{
+      const input=document.createElement("input");
+      input.type="text";
+      input.value=value==null?"":String(value);
+      input.onchange=()=>setPropValue(it.id, row.key, input.value);
+      wrap.appendChild(input);
+    }
+    box.appendChild(wrap);
+  });
+}
+
 function select(id){
   const it=catalog.find(x=>x.id===id); if(!it)return;
   state.selected=id;
@@ -932,6 +1165,7 @@ function select(id){
     $("#stageWash").style.background=thumb(it);
   }
   renderStrip();
+  renderProps();
 }
 
 function shine(){
@@ -957,10 +1191,12 @@ function curtain(){
 
 function setOut(name){
   state.out=name;
-  $("#outDP").classList.toggle("on", name===$("#outDP").dataset.out);
-  $("#outHDMI").classList.toggle("on", name===$("#outHDMI").dataset.out);
-  $("#outDP").querySelector(".sub").textContent=name===$("#outDP").dataset.out?"MAIN":"STANDBY";
-  $("#outHDMI").querySelector(".sub").textContent=name===$("#outHDMI").dataset.out?"MAIN":"STANDBY";
+  $$("#outRow .out").forEach(btn=>{
+    const on=name===btn.dataset.out;
+    btn.classList.toggle("on", on);
+    const sub=btn.querySelector(".sub");
+    if(sub) sub.textContent=on?"MAIN":"STANDBY";
+  });
   const it=catalog.find(x=>x.id===state.selected);
   if(it) $("#stageMeta").textContent=`${it.type} · Performing on ${name} · ${state.fps} fps`;
   renderStrip();
@@ -972,11 +1208,16 @@ function setAtmo(on){
   $("#atmo").classList.toggle("on",on);
   $("#knobAtmo").classList.toggle("on",on);
 }
-function setGaming(on){
+function paintGamingPref(on){
   state.gaming=on;
-  $("#stage").classList.toggle("dim",on);
   $("#gaming").classList.toggle("on",on);
   $("#knobGame").classList.toggle("on",on);
+}
+function paintGamingActive(on){
+  $("#stage").classList.toggle("dim",on);
+}
+function setGaming(on){
+  paintGamingPref(on);
   if(window.anisOnGaming) window.anisOnGaming(on);
 }
 
@@ -985,6 +1226,8 @@ function closeSheets(){
   $("#settingsSheet").classList.remove("open");
   $("#searchSheet").classList.remove("open");
   $("#workshopSheet").classList.remove("open");
+  const props=$("#propsSheet");
+  if(props) props.classList.remove("open");
 }
 function libOpen(){
   return $("#searchSheet").classList.contains("open") || $("#workshopSheet").classList.contains("open");
@@ -1047,6 +1290,8 @@ function setNav(name){
   $("#settingsSheet").classList.remove("open");
   $("#searchSheet").classList.remove("open");
   $("#workshopSheet").classList.remove("open");
+  const props=$("#propsSheet");
+  if(props) props.classList.remove("open");
   if(name==="live") $("#liveSheet").classList.add("open");
   if(name==="settings") $("#settingsSheet").classList.add("open");
   syncStripAway();
@@ -1076,7 +1321,7 @@ function paintGrid(box, items, kind){
   }
   items.forEach(it=>{
     const c=document.createElement("button");
-    c.className="gcard"+(it.id===state.selected?" on":"")+(kind==="ws"&&it.installed?" ws-have":"");
+    c.className="gcard"+(kind==="ws"?" ws":"")+(it.id===state.selected?" on":"")+(kind==="ws"&&it.installed?" ws-have":"");
     c.type="button";
     if(kind==="ws") c.dataset.wsid=String(it.id);
     else c.dataset.id=String(it.id);
@@ -1090,9 +1335,6 @@ function paintGrid(box, items, kind){
       img.draggable=false;
       img.alt="";
       let url=it.pv || ART;
-      if(/^https:\/\//i.test(url) && /steam/i.test(url) && url.indexOf("?")<0){
-        url += (url.endsWith("/") ? "" : "") + "?imw=320&imh=180&ima=fit";
-      }
       img.src=url;
       thumbEl.appendChild(img);
     }else{
@@ -1122,17 +1364,17 @@ function paintGrid(box, items, kind){
     info.appendChild(extra);
     c.appendChild(info);
     if(kind==="ws"){
-      const sb=document.createElement("button");
-      sb.className="sub-btn";
-      sb.type="button";
-      if(it.installed){
-        sb.disabled=true;
-        sb.textContent="SUSCRIPTO";
-      }else{
-        sb.dataset.sub=String(it.id);
-        sb.textContent="Subscribe";
-      }
-      c.appendChild(sb);
+    const sb=document.createElement("button");
+    sb.className="sub-btn";
+    sb.type="button";
+    if(it.installed){
+      sb.disabled=true;
+      sb.textContent="SUSCRIPTO";
+    }else{
+      sb.dataset.sub=String(it.id);
+      sb.textContent="Subscribe";
+    }
+    c.appendChild(sb);
     }
     c.onclick=e=>{
       if(e.target.closest(".sub-btn")) return;
@@ -1274,12 +1516,24 @@ $("#nav").onclick=e=>{
 };
 $("#shine").onclick=shine;
 $("#curtain").onclick=curtain;
-$("#outDP").onclick=()=>setOut($("#outDP").dataset.out);
-$("#outHDMI").onclick=()=>setOut($("#outHDMI").dataset.out);
+$("#outRow").onclick=e=>{
+  const b=e.target.closest(".out"); if(!b) return;
+  setOut(b.dataset.out);
+};
 $("#atmo").onclick=()=>setAtmo(!state.atmo);
 $("#gaming").onclick=()=>setGaming(!state.gaming);
 $("#knobAtmo").onclick=()=>setAtmo(!state.atmo);
 $("#knobGame").onclick=()=>setGaming(!state.gaming);
+$("#props").onclick=()=>{
+  const sheet=$("#propsSheet");
+  if(!sheet) return;
+  const open=sheet.classList.contains("open");
+  closeSheets();
+  if(!open){
+    renderProps();
+    sheet.classList.add("open");
+  }
+};
 $("#knobIdle").onclick=function(){this.classList.toggle("on")};
 function setVol(v){
   state.vol=+v;
@@ -1348,8 +1602,8 @@ select("ss");
 window.anis = {
   catalog, workshop, state, $, $$,
   renderStrip, select, toast, thumb,
-  setOut, setAtmo, setGaming, setVol, setFps, setMeasuredFps, shortOut,
-  renderWorkshop, renderLibrary, openSearch, closeSearch, paintGrid, ratingsCsv,
+  setOut, setAtmo, setGaming, paintGamingPref, paintGamingActive, setVol, setFps, setMeasuredFps, shortOut,
+  renderWorkshop, renderLibrary, openSearch, closeSearch, paintGrid, ratingsCsv, renderProps,
   get selectedId(){ return state.selected; },
 };
 </script>

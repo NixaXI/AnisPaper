@@ -1,6 +1,7 @@
 #include "rpc_client.h"
 
 #include <csignal>
+#include <algorithm>
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDateTime>
@@ -30,6 +31,7 @@
 #include <QUrl>
 #include <QUrlQuery>
 #include <QVariantMap>
+#include <QVector>
 #include <QVBoxLayout>
 #include <QtGlobal>
 
@@ -646,10 +648,16 @@ void RpcClient::pollStatus() {
       liveRenderers_ = nextRenderers;
       emit liveRenderersChanged();
     }
-    const bool gaming = object.value("gaming").toObject().value("active").toBool();
-    if (gamingActive_ != gaming) {
-      gamingActive_ = gaming;
+    const auto gaming = object.value("gaming").toObject();
+    const bool active = gaming.value("active").toBool();
+    if (gamingActive_ != active) {
+      gamingActive_ = active;
       emit gamingActiveChanged();
+    }
+    const QString mode = gaming.value("mode").toString(gamingMode_);
+    if (!mode.isEmpty() && gamingMode_ != mode) {
+      gamingMode_ = mode;
+      emit gamingModeChanged();
     }
     const QString line = parts.isEmpty() ? QStringLiteral("sin renderer") : parts.join(QStringLiteral(" · "));
     if (measuredFps_ != line) {
@@ -725,6 +733,10 @@ QVariantList RpcClient::catalogItems() const {
   return items;
 }
 
+QVariantMap RpcClient::itemProperties(const QString &id) const {
+  return catalog_.itemById(id).value(QStringLiteral("properties")).toObject().toVariantMap();
+}
+
 void RpcClient::applyWallpaper(const QString &id, const QString &output) {
   setSelectedId(id);
   QString out = output.trimmed();
@@ -744,9 +756,94 @@ void RpcClient::stopWallpaper(const QString &output) {
 }
 
 void RpcClient::setGamingMode(const QString &mode) {
-  send("settings.set", {{"gamingMode", mode}}, [this](const QJsonValue &, const QString &error) {
+  const QString normalized = mode.trimmed().toLower();
+  const QString next = (normalized == QStringLiteral("on") ||
+                        normalized == QStringLiteral("off") ||
+                        normalized == QStringLiteral("auto"))
+                           ? normalized
+                           : QStringLiteral("auto");
+  if (gamingMode_ != next) {
+    gamingMode_ = next;
+    emit gamingModeChanged();
+  }
+  send("settings.set", {{"gamingMode", next}}, [this](const QJsonValue &, const QString &error) {
     if (!error.isEmpty()) setToast(error);
   });
+}
+
+void RpcClient::setWallpaperProperties(const QString &id, const QVariantMap &values) {
+  if (id.trimmed().isEmpty() || values.isEmpty()) return;
+  send("wallpaper.setProperties",
+       {{"id", id}, {"values", QJsonObject::fromVariantMap(values)}},
+       [this](const QJsonValue &, const QString &error) {
+         if (!error.isEmpty()) setToast(error);
+       });
+}
+
+void RpcClient::setWallpaperProperty(const QString &id, const QString &key,
+                                    const QVariant &value) {
+  if (id.trimmed().isEmpty() || key.trimmed().isEmpty()) return;
+  QVariantMap values;
+  values.insert(key, value);
+  setWallpaperProperties(id, values);
+}
+
+QVariantList RpcClient::wallpaperPropertyRows(const QString &id) const {
+  const QJsonObject schema =
+      catalog_.itemById(id).value(QStringLiteral("properties")).toObject();
+  struct Row {
+    int order = 0;
+    QString key;
+    QVariantMap map;
+  };
+  QVector<Row> rows;
+  rows.reserve(schema.size());
+  const QSet<QString> types{QStringLiteral("bool"), QStringLiteral("slider"),
+                            QStringLiteral("color"), QStringLiteral("combo"),
+                            QStringLiteral("textinput"), QStringLiteral("file"),
+                            QStringLiteral("directory")};
+  for (auto it = schema.begin(); it != schema.end(); ++it) {
+    if (!it.value().isObject()) continue;
+    const QJsonObject prop = it.value().toObject();
+    const QString type = prop.value(QStringLiteral("type")).toString();
+    if (!types.contains(type) || prop.value(QStringLiteral("hidden")).toBool()) continue;
+    QVariantMap row;
+    row.insert(QStringLiteral("key"), it.key());
+    row.insert(QStringLiteral("type"), type);
+    row.insert(QStringLiteral("text"),
+               prop.value(QStringLiteral("text")).toString(it.key()));
+    row.insert(QStringLiteral("value"), prop.value(QStringLiteral("value")).toVariant());
+    row.insert(QStringLiteral("min"), prop.value(QStringLiteral("min")).toDouble(0));
+    row.insert(QStringLiteral("max"), prop.value(QStringLiteral("max")).toDouble(100));
+    const double step = prop.value(QStringLiteral("step")).toDouble(1);
+    row.insert(QStringLiteral("step"), step > 0 ? step : 1.0);
+    QVariantList options;
+    for (const auto &optValue : prop.value(QStringLiteral("options")).toArray()) {
+      if (optValue.isObject()) {
+        const auto opt = optValue.toObject();
+        QVariantMap mapped;
+        mapped.insert(QStringLiteral("label"),
+                      opt.value(QStringLiteral("label"))
+                          .toString(opt.value(QStringLiteral("text")).toString()));
+        mapped.insert(QStringLiteral("value"), opt.value(QStringLiteral("value")).toVariant());
+        options.append(mapped);
+      } else {
+        QVariantMap mapped;
+        mapped.insert(QStringLiteral("label"), optValue.toVariant().toString());
+        mapped.insert(QStringLiteral("value"), optValue.toVariant());
+        options.append(mapped);
+      }
+    }
+    row.insert(QStringLiteral("options"), options);
+    rows.push_back(Row{prop.value(QStringLiteral("order")).toInt(0), it.key(), row});
+  }
+  std::sort(rows.begin(), rows.end(), [](const Row &a, const Row &b) {
+    if (a.order != b.order) return a.order < b.order;
+    return a.key < b.key;
+  });
+  QVariantList out;
+  for (const auto &row : rows) out.append(row.map);
+  return out;
 }
 
 void RpcClient::openExternal(const QString &url) {
@@ -1854,6 +1951,11 @@ void RpcClient::bootstrap() {
     if (fpsCap_ != fps) {
       fpsCap_ = fps;
       emit fpsCapChanged();
+    }
+    const QString mode = object.value("gamingMode").toString(QStringLiteral("auto"));
+    if (!mode.isEmpty() && gamingMode_ != mode) {
+      gamingMode_ = mode;
+      emit gamingModeChanged();
     }
   });
   send("status.get", {}, [this](const QJsonValue &result, const QString &) {

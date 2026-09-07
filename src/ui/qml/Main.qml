@@ -45,7 +45,9 @@ ApplicationWindow {
     property string heroPreview: ""
     property bool stageLive: false
     property bool atmoOn: true
-    property bool gamingOn: false
+    property bool gamingOn: client.gamingMode !== "off"
+    property bool optionsOpen: false
+    property var propRows: []
     property bool curtainClosing: false
     property int wsPage: 1
     property bool wsBusy: false
@@ -75,6 +77,7 @@ ApplicationWindow {
         heroTitle = title
         heroType = type
         heroPreview = preview || ""
+        reloadProps()
     }
     function setTypeChip(value) {
         typeChip = value
@@ -95,6 +98,43 @@ ApplicationWindow {
         curtainClosing = true
         curtainTimer.restart()
     }
+    function reloadProps() {
+        propRows = client.selectedId !== "" ? client.wallpaperPropertyRows(client.selectedId) : []
+    }
+    function propLabel(text, fallback) {
+        var raw = String(text || fallback || "")
+        raw = raw.replace(/<[^>]+>/g, " ").replace(/ui_/g, "").replace(/_/g, " ")
+        return raw.replace(/\s+/g, " ").trim() || fallback
+    }
+    function weToHex(value) {
+        var parts = String(value || "").trim().split(/\s+/)
+        if (parts.length < 3)
+            return "#ffffff"
+        function c(n) {
+            var v = Math.round(Math.min(1, Math.max(0, Number(n) || 0)) * 255)
+            return ("0" + v.toString(16)).slice(-2)
+        }
+        return "#" + c(parts[0]) + c(parts[1]) + c(parts[2])
+    }
+    function hexToWe(hex) {
+        var n = parseInt(String(hex || "#ffffff").slice(1), 16)
+        if (!isFinite(n))
+            return "1 1 1"
+        return ((n >> 16) & 255) / 255 + " " + ((n >> 8) & 255) / 255 + " " + (n & 255) / 255
+    }
+    function rebuildWorkshop() {
+        wsModel.clear()
+        var items = client.workshopItems
+        for (var i = 0; i < items.length; i++) {
+            var d = items[i]
+            wsModel.append({
+                "wsid": String(d.id),
+                "wtitle": d.title || String(d.id),
+                "wpreview": d.preview || "",
+                "installed": !!d.installed
+            })
+        }
+    }
 
     Timer {
         id: curtainTimer
@@ -107,81 +147,9 @@ ApplicationWindow {
     }
 
     function wsSearch(page) {
-        if (wsBusy || page < 1)
+        if (page < 1)
             return
-        wsPage = page
-        wsModel.clear()
-        wsError = ""
-        wsBusy = true
-        var q = wsField.text.trim()
-        var url = "https://steamcommunity.com/workshop/browse/?appid=431960"
-                + "&browsesort=textsearch&section=readytouseitems&p=" + page
-                + (q.length ? "&searchtext=" + encodeURIComponent(q) : "")
-        var xhr = new XMLHttpRequest()
-        xhr.open("GET", url, true)
-        xhr.onreadystatechange = function() {
-            if (xhr.readyState !== XMLHttpRequest.DONE)
-                return
-            if (xhr.status !== 200) {
-                wsBusy = false
-                wsError = "HTTP " + xhr.status + " contactando Steam Community."
-                return
-            }
-            var re = /sharedfiles\/filedetails\/\?id=(\d+)/g
-            var m
-            var seen = {}
-            var ids = []
-            while ((m = re.exec(xhr.responseText)) !== null) {
-                if (!seen[m[1]]) {
-                    seen[m[1]] = true
-                    ids.push(m[1])
-                }
-            }
-            if (ids.length === 0) {
-                wsBusy = false
-                wsError = "Sin resultados en esta página."
-                return
-            }
-            wsDetails(ids.slice(0, 30))
-        }
-        try { xhr.send() } catch (e) { wsBusy = false; wsError = "Red no disponible." }
-    }
-
-    function wsDetails(ids) {
-        var body = ""
-        for (var i = 0; i < ids.length; i++)
-            body += (i ? "&" : "") + "publishedfileids%5B" + i + "%5D=" + ids[i]
-        var xhr = new XMLHttpRequest()
-        xhr.open("POST", "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/?format=json", true)
-        xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
-        xhr.onreadystatechange = function() {
-            if (xhr.readyState !== XMLHttpRequest.DONE)
-                return
-            wsBusy = false
-            if (xhr.status !== 200) {
-                wsError = "HTTP " + xhr.status + " en GetPublishedFileDetails."
-                return
-            }
-            try {
-                var data = JSON.parse(xhr.responseText)
-                var arr = (data.response && data.response.publishedfiledetails) || []
-                for (var j = 0; j < arr.length; j++) {
-                    var d = arr[j]
-                    if (!d || !d.publishedfileid)
-                        continue
-                    wsModel.append({
-                        "wsid": String(d.publishedfileid),
-                        "wtitle": d.title || String(d.publishedfileid),
-                        "wpreview": d.preview_url || ""
-                    })
-                }
-                if (wsModel.count === 0)
-                    wsError = "Steam no devolvió detalles para esta página."
-            } catch (e) {
-                wsError = "Respuesta inválida de Steam."
-            }
-        }
-        try { xhr.send(body) } catch (e) { wsBusy = false; wsError = "Red no disponible." }
+        client.searchWorkshop(wsField.text.trim(), page, "everyone,questionable")
     }
 
     Connections {
@@ -192,7 +160,13 @@ ApplicationWindow {
                 root.heroType = ""
                 root.heroPreview = ""
             }
+            root.reloadProps()
         }
+        function onCatalogChanged() { root.reloadProps() }
+        function onWorkshopItemsChanged() { root.rebuildWorkshop() }
+        function onWorkshopBusyChanged() { root.wsBusy = client.workshopBusy }
+        function onWorkshopErrorChanged() { root.wsError = client.workshopError }
+        function onWorkshopPageChanged() { root.wsPage = client.workshopPage }
     }
 
     // ---- ambient backdrop (few items, opacity only) ----
@@ -200,7 +174,7 @@ ApplicationWindow {
         id: aurora
         anchors.fill: parent
         visible: atmoOn
-        opacity: gamingOn ? 0.42 : 1
+        opacity: client.gamingActive ? 0.42 : 1
         gradient: Gradient {
             orientation: Gradient.Horizontal
             GradientStop { position: 0.0; color: "#22ffd54a" }
@@ -355,7 +329,11 @@ ApplicationWindow {
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.view = modelData.key
+                        onClicked: {
+                            root.view = modelData.key
+                            if (modelData.key === "workshop" && wsModel.count === 0)
+                                root.wsSearch(1)
+                        }
                     }
                 }
             }
@@ -485,7 +463,7 @@ ApplicationWindow {
                         anchors.verticalCenter: parent.verticalCenter
                         spacing: 3
                         Text { text: "GAMING MODE"; color: cCream; font.pixelSize: 11; font.letterSpacing: 1.4; font.bold: true }
-                        Text { text: "Stage dimmed while playing"; color: cMuted; font.pixelSize: 9 }
+                        Text { text: "Pause wallpapers when a game is running"; color: cMuted; font.pixelSize: 9 }
                     }
                     Rectangle {
                         width: 44
@@ -503,7 +481,7 @@ ApplicationWindow {
                             x: gamingOn ? 22 : 2
                             color: gamingOn ? "#120e0a" : cMuted
                         }
-                        MouseArea { anchors.fill: parent; onClicked: gamingOn = !gamingOn }
+                        MouseArea { anchors.fill: parent; onClicked: client.setGamingMode(client.gamingMode === "off" ? "auto" : "off") }
                     }
                 }
             }
@@ -737,7 +715,7 @@ ApplicationWindow {
                         }
 
                         Rectangle {
-                            visible: gamingOn
+                            visible: client.gamingActive
                             anchors.fill: parent
                             color: "#000000"
                             opacity: 0.34
@@ -842,9 +820,9 @@ ApplicationWindow {
                                     height: 22
                                     width: modeLab.implicitWidth + 20
                                     radius: 99
-                                    color: stageLive && !gamingOn ? cAccent : "transparent"
+                                    color: stageLive && !client.gamingActive ? cAccent : "transparent"
                                     border.width: 1
-                                    border.color: gamingOn && stageLive ? cDanger
+                                    border.color: client.gamingActive && stageLive ? cDanger
                                                   : stageLive ? cAccent
                                                   : heroTitle.length ? cLineSoft : cLineSoft
                                     Text {
@@ -852,7 +830,7 @@ ApplicationWindow {
                                         anchors.centerIn: parent
                                         text: !client.online ? "OFFLINE"
                                               : client.applying ? "APPLYING…"
-                                              : gamingOn && stageLive ? "STAGE DIMMED"
+                                              : client.gamingActive && stageLive ? "STAGE DIMMED"
                                               : stageLive ? "NOW SHINING"
                                               : heroTitle.length ? "READY IN THE WINGS"
                                               : "WAITING IN THE WINGS"
@@ -860,8 +838,8 @@ ApplicationWindow {
                                         font.bold: true
                                         font.letterSpacing: 1.4
                                         color: !client.online ? cDanger
-                                               : gamingOn && stageLive ? cDanger
-                                               : stageLive && !gamingOn ? "#141005"
+                                               : client.gamingActive && stageLive ? cDanger
+                                               : stageLive && !client.gamingActive ? "#141005"
                                                : heroTitle.length ? cAccent : cMuted
                                     }
                                 }
@@ -879,7 +857,7 @@ ApplicationWindow {
                             Text {
                                 width: Math.min(430, parent.width)
                                 text: stageLive
-                                      ? (gamingOn ? "Holding the last frame — the stage rests while you play."
+                                      ? (client.gamingActive ? "Holding the last frame — the stage rests while you play."
                                                   : "Now shining. The desktop performs itself.")
                                       : (heroTitle.length ? "Ready in the wings. Press SHINE to put it on stage."
                                                           : "Waiting in the wings — choose a wallpaper below and make it shine.")
@@ -912,7 +890,7 @@ ApplicationWindow {
                                             height: 6
                                             radius: 3
                                             anchors.verticalCenter: parent.verticalCenter
-                                            color: stageLive && !gamingOn ? cOk : cDanger
+                                            color: stageLive && !client.gamingActive ? cOk : cDanger
                                         }
                                         Text {
                                             id: fpsChip
@@ -932,7 +910,7 @@ ApplicationWindow {
                                     border.color: cLineSoft
                                     Text {
                                         anchors.centerIn: parent
-                                        text: gamingOn ? "GAMING" : "RUNNING"
+                                        text: client.gamingActive ? "GAMING" : "RUNNING"
                                         color: cCream
                                         font.pixelSize: 10
                                         font.bold: true
@@ -1029,6 +1007,31 @@ ApplicationWindow {
                                         color: "transparent"
                                         border.width: 1
                                         border.color: curtainBtn.enabled ? cLine : "#222222"
+                                    }
+                                }
+                                Button {
+                                    id: optionsBtn
+                                    visible: root.propRows.length > 0
+                                    enabled: client.online && client.selectedId !== ""
+                                    implicitHeight: 46
+                                    onClicked: {
+                                        root.reloadProps()
+                                        root.optionsOpen = true
+                                    }
+                                    contentItem: Text {
+                                        text: "OPTIONS"
+                                        color: optionsBtn.enabled ? cAccent : "#555555"
+                                        font.pixelSize: 12
+                                        font.bold: true
+                                        font.letterSpacing: 1.2
+                                        horizontalAlignment: Text.AlignHCenter
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                    background: Rectangle {
+                                        radius: 11
+                                        color: "transparent"
+                                        border.width: 1
+                                        border.color: optionsBtn.enabled ? cAccent : "#222222"
                                     }
                                 }
                             }
@@ -1299,19 +1302,20 @@ ApplicationWindow {
                                 height: 24
                                 width: subTxt.implicitWidth + 16
                                 radius: 99
-                                color: cBright
+                                color: installed ? cLine : cBright
                                 Text {
                                     id: subTxt
                                     anchors.centerIn: parent
-                                    text: "+ SUSCRIBIRSE"
-                                    color: "#171204"
+                                    text: installed ? "INSTALADO" : "+ SUSCRIBIRSE"
+                                    color: installed ? cMuted : "#171204"
                                     font.pixelSize: 9
                                     font.bold: true
                                 }
                                 MouseArea {
                                     anchors.fill: parent
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: Qt.openUrlExternally("steam://url/CommunityFilePage/" + wsid)
+                                    enabled: !installed
+                                    onClicked: client.subscribeWorkshop(wsid)
                                 }
                             }
                         }
@@ -1445,7 +1449,7 @@ ApplicationWindow {
                     }
                     Text {
                         text: "output: " + (client.selectedOutput.length ? client.selectedOutput : "—")
-                              + (stageLive ? (gamingOn ? " · dimmed" : " · now shining") : " · idle")
+                              + (stageLive ? (client.gamingActive ? " · dimmed" : " · now shining") : " · idle")
                         color: cMuted
                         font.pixelSize: 10
                     }
@@ -1528,6 +1532,141 @@ ApplicationWindow {
                     background: Rectangle {
                         radius: 11
                         color: parent.enabled ? cBright : cLine
+                    }
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        visible: client.downloadActive
+        anchors.left: sidebar.right
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 62
+        height: 28
+        color: cPanel2
+        z: 60
+        Rectangle {
+            id: dlFill
+            height: parent.height
+            width: parent.width * Math.max(0, Math.min(1, client.downloadPercent / 100))
+            color: "#33ffd54a"
+        }
+        Text {
+            anchors.centerIn: parent
+            text: (client.downloadLabel || "Descargando…") + (client.downloadPercent >= 0 ? ("  " + client.downloadPercent + "%") : "")
+            color: cCream
+            font.pixelSize: 11
+            font.bold: true
+        }
+    }
+
+    Rectangle {
+        visible: root.optionsOpen
+        anchors.fill: parent
+        color: "#99000000"
+        z: 70
+        MouseArea { anchors.fill: parent; onClicked: root.optionsOpen = false }
+
+        Rectangle {
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            anchors.margins: 24
+            width: 380
+            radius: 16
+            color: cPanel
+            border.width: 1
+            border.color: cLine
+            MouseArea { anchors.fill: parent; onClicked: {} }
+
+            Column {
+                anchors.fill: parent
+                anchors.margins: 18
+                spacing: 10
+                Row {
+                    width: parent.width
+                    Text {
+                        text: "WALLPAPER OPTIONS"
+                        color: cAccent
+                        font.pixelSize: 11
+                        font.bold: true
+                        font.letterSpacing: 2
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                    Item { width: parent.width - 200; height: 1 }
+                    Text {
+                        text: "✕"
+                        color: cMuted
+                        font.pixelSize: 16
+                        MouseArea { anchors.fill: parent; anchors.margins: -8; onClicked: root.optionsOpen = false }
+                    }
+                }
+                Text {
+                    width: parent.width
+                    text: heroTitle
+                    color: cCream
+                    font.pixelSize: 16
+                    font.bold: true
+                    elide: Text.ElideRight
+                }
+                Flickable {
+                    width: parent.width
+                    height: parent.height - 70
+                    clip: true
+                    contentHeight: propCol.height
+                    Column {
+                        id: propCol
+                        width: parent.width
+                        spacing: 12
+                        Repeater {
+                            model: root.propRows
+                            delegate: Column {
+                                width: propCol.width
+                                spacing: 6
+                                Text {
+                                    width: parent.width
+                                    text: root.propLabel(modelData.text, modelData.key)
+                                    color: cCream
+                                    font.pixelSize: 12
+                                    wrapMode: Text.WordWrap
+                                }
+                                Switch {
+                                    visible: modelData.type === "bool"
+                                    checked: !!modelData.value
+                                    onToggled: client.setWallpaperProperty(client.selectedId, modelData.key, checked)
+                                }
+                                Slider {
+                                    visible: modelData.type === "slider"
+                                    width: parent.width
+                                    from: Number(modelData.min)
+                                    to: Number(modelData.max)
+                                    stepSize: Number(modelData.step) > 0 ? Number(modelData.step) : 1
+                                    value: Number(modelData.value)
+                                    onMoved: client.setWallpaperProperty(client.selectedId, modelData.key, value)
+                                }
+                                ComboBox {
+                                    visible: modelData.type === "combo"
+                                    width: parent.width
+                                    model: modelData.options
+                                    textRole: "label"
+                                    onActivated: client.setWallpaperProperty(client.selectedId, modelData.key, model[index].value)
+                                }
+                                TextField {
+                                    visible: modelData.type === "color" || modelData.type === "textinput" || modelData.type === "file" || modelData.type === "directory"
+                                    width: parent.width
+                                    color: cCream
+                                    text: modelData.type === "color" ? root.weToHex(modelData.value) : String(modelData.value || "")
+                                    background: Rectangle { radius: 8; color: cBg; border.width: 1; border.color: cLine }
+                                    onEditingFinished: {
+                                        var v = text
+                                        if (modelData.type === "color") v = root.hexToWe(text)
+                                        client.setWallpaperProperty(client.selectedId, modelData.key, v)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

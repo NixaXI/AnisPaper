@@ -40,6 +40,7 @@
       sub: typeOf(raw),
       favorite: !!raw.favorite,
       tags: Array.isArray(raw.tags) ? raw.tags : [],
+      properties: {},
     };
   }
 
@@ -50,6 +51,7 @@
     for (const raw of items || []) A.catalog.push(toItem(raw));
     if (typeof A.renderLibrary === "function") A.renderLibrary();
     if (typeof A.renderWorkshop === "function") A.renderWorkshop();
+    if (typeof A.renderProps === "function") A.renderProps();
     if (!A.catalog.length) return;
     if (!A.catalog.some((x) => x.id === state.selected)) {
       A.select(A.catalog[0].id);
@@ -63,16 +65,21 @@
   function ingestMonitors(list) {
     const names = (list || []).map((m) => m.name).filter(Boolean);
     if (!names.length) return;
-    const dp = A.$("#outDP");
-    const hd = A.$("#outHDMI");
-    dp.dataset.out = names[0];
-    dp.childNodes[0].nodeValue = names[0];
-    if (names.length > 1) {
-      hd.dataset.out = names[1];
-      hd.childNodes[0].nodeValue = names[1];
-      hd.style.display = "";
-    } else {
-      hd.style.display = "none";
+    const row = A.$("#outRow");
+    if (row) {
+      row.innerHTML = "";
+      names.forEach(function (name, i) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "out" + (name === state.out || (!names.includes(state.out) && i === 0) ? " on" : "");
+        btn.dataset.out = name;
+        const sub = document.createElement("span");
+        sub.className = "sub";
+        sub.textContent = (name === state.out || (!names.includes(state.out) && i === 0)) ? "MAIN" : "STANDBY";
+        btn.appendChild(document.createTextNode(name));
+        btn.appendChild(sub);
+        row.appendChild(btn);
+      });
     }
     if (!names.includes(state.out)) A.setOut(names[0]);
     for (const name of names) {
@@ -128,7 +135,12 @@
     if (client) client.volumePercent = vol;
   };
   window.anisOnGaming = function (on) {
-    if (client) client.setGamingMode(on ? "on" : "auto");
+    // The dock switch is on/off.  On means "pause when a game is running"
+    // (daemon auto).  Off must be a hard off — never auto-detect Steam.
+    if (client) client.setGamingMode(on ? "auto" : "off");
+  };
+  window.anisOnProp = function (id, values) {
+    if (client) client.setWallpaperProperties(id, values);
   };
 
   if (typeof qt === "undefined" || !qt.webChannelTransport) return;
@@ -145,6 +157,17 @@
       });
     };
     pullCatalog();
+
+    const prevSelect = A.select;
+    A.select = function (id) {
+      if (typeof prevSelect === "function") prevSelect(id);
+      if (!client || !id || typeof client.itemProperties !== "function") return;
+      client.itemProperties(id, function (props) {
+        const it = A.catalog.find(function (x) { return x.id === id; });
+        if (it) it.properties = props && typeof props === "object" ? props : {};
+        if (typeof A.renderProps === "function") A.renderProps();
+      });
+    };
     client.catalogChanged.connect(pullCatalog);
     client.monitorsChanged.connect(function () {
       ingestMonitors(client.monitors);
@@ -157,8 +180,11 @@
       if (msg) A.toast("DAEMON", msg);
     });
     client.gamingActiveChanged.connect(function () {
-      const on = !!client.gamingActive;
-      if (on !== state.gaming) A.setGaming(on);
+      // Active is a live pause, not the user preference.  Writing it back
+      // through setGaming used to persist gamingMode=on after a Steam launch.
+      if (typeof A.paintGamingActive === "function") {
+        A.paintGamingActive(!!client.gamingActive);
+      }
     });
     client.selectedOutputChanged.connect(function () {
       const out = client.selectedOutput;
@@ -167,6 +193,17 @@
 
     if (typeof client.fpsCap === "number") A.setFps(client.fpsCap);
     if (typeof client.volumePercent === "number") A.setVol(client.volumePercent);
+    if (typeof A.paintGamingPref === "function") {
+      A.paintGamingPref((client.gamingMode || "auto") !== "off");
+    }
+    if (typeof A.paintGamingActive === "function") {
+      A.paintGamingActive(!!client.gamingActive);
+    }
+    client.gamingModeChanged.connect(function () {
+      if (typeof A.paintGamingPref === "function") {
+        A.paintGamingPref((client.gamingMode || "auto") !== "off");
+      }
+    });
 
     function workshopOwned(id, item) {
       const sid = String(id || "");

@@ -1,5 +1,6 @@
 <RCC>
   <qresource prefix="/ui">
+    <file alias="Main.qml">qml/Main.qml</file>
     <file alias="index.html">web/index.html</file>
     <file alias="bridge.js">web/bridge.js</file>
   </qresource>
