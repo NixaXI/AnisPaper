@@ -304,10 +304,12 @@ if(BUILD_TESTING)
       tests/isolated_renderer_cleanup_test.cpp
       src/renderers/renderer.h
       src/renderers/isolated_renderer.h
-      src/renderers/isolated_renderer.cpp)
+      src/renderers/isolated_renderer.cpp
+      src/common/wayland_monitor.h
+      src/common/wayland_monitor.cpp)
   target_compile_features(anispaper-isolated-renderer-cleanup-test PRIVATE cxx_std_20)
   target_link_libraries(anispaper-isolated-renderer-cleanup-test PRIVATE
-      anispaper-bridge Qt6::Core Qt6::Gui)
+      anispaper-bridge Qt6::Core Qt6::Gui PkgConfig::WAYLAND_CLIENT)
   target_compile_definitions(anispaper-isolated-renderer-cleanup-test PRIVATE
       ANISPAPER_ISOLATED_RENDERER_TESTING=1)
   target_compile_options(anispaper-isolated-renderer-cleanup-test PRIVATE -Wall -Wextra -Wpedantic)
@@ -345,7 +347,20 @@ if(BUILD_TESTING)
   else()
     add_test(NAME gpu_vendor
         COMMAND $<TARGET_FILE:anispaper-gpu-vendor-test>)
-  endif()
+    endif()
+    add_executable(anispaper-wallpaper-properties-test
+        tests/wallpaper_properties_test.cpp
+        src/renderers/wallpaper_properties.h)
+    target_compile_features(anispaper-wallpaper-properties-test PRIVATE cxx_std_20)
+    target_link_libraries(anispaper-wallpaper-properties-test PRIVATE Qt6::Core)
+    target_compile_options(anispaper-wallpaper-properties-test PRIVATE -Wall -Wextra -Wpedantic)
+    if(ANISPAPER_ELF_LOADER)
+      add_test(NAME wallpaper_properties
+          COMMAND ${ANISPAPER_ELF_LOADER} $<TARGET_FILE:anispaper-wallpaper-properties-test>)
+    else()
+      add_test(NAME wallpaper_properties
+          COMMAND $<TARGET_FILE:anispaper-wallpaper-properties-test>)
+    endif()
   add_test(NAME f1_integration COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/f1_integration.py $<TARGET_FILE:anis-paperd>)
   set_tests_properties(f1_integration PROPERTIES SKIP_RETURN_CODE 77)
   add_test(NAME f2_integration COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/f2_integration.py $<TARGET_FILE:anis-paperd>)
@@ -365,6 +380,7 @@ if(BUILD_TESTING)
   add_test(NAME f4_integration COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/f4_integration.py $<TARGET_FILE:anis-paperd>)
   set_tests_properties(f4_integration PROPERTIES SKIP_RETURN_CODE 77)
   add_test(NAME audio_fps_contract COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/audio_fps_contract.py)
+  add_test(NAME web_sandbox_contract COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/web_sandbox_contract.py)
   add_test(NAME game_pause_contract COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/game_pause_contract.py)
   add_test(NAME signal_shutdown_contract COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/signal_shutdown_contract.py)
 endif()

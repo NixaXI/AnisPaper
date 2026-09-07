@@ -3,13 +3,15 @@
 #include "renderer.h"
 
 #include <QTimer>
+#include <QVariant>
 
 #include <memory>
 
+class QWebEngineProfile;
 class QWebEngineView;
 
-// QtWebEngine renderer.  It runs inside the isolated worker and samples the
-// widget through QWidget::grab at the configured fps (normally 60).
+// Isolated QtWebEngine wallpaper.  Remote/network URLs are blocked; frames come
+// from a canvas readback (WebGL/2D) with QWidget::grab as a local-HTML fallback.
 class WebRenderer final : public Renderer {
   Q_OBJECT
 
@@ -30,15 +32,22 @@ class WebRenderer final : public Renderer {
 
  private:
   void captureFrame();
+  void onJsCapture(const QVariant &result);
+  void acceptFrame(const QImage &image);
   void activateFallback(const QString &reason);
+  QImage placeholderFrame(const QString &reason) const;
+  void injectScripts();
+  void applyMediaVolume();
 
+  std::unique_ptr<QWebEngineProfile> profile_;
   std::unique_ptr<QWebEngineView> view_;
   QTimer frameTimer_;
   QImage frame_;
   bool running_ = false;
   bool paused_ = false;
   bool loaded_ = false;
-  bool fallback_ = false;
+  bool fallback_ = true;
+  bool captureInFlight_ = false;
   int frameCount_ = 0;
   qint64 fpsEpochMs_ = 0;
   double fps_ = 0.0;

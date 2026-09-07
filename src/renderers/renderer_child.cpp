@@ -9,8 +9,11 @@
 #include <QApplication>
 #include <QBuffer>
 #include <QCommandLineParser>
+#include <QFile>
+#include <QIODevice>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonParseError>
 #include <QSocketNotifier>
 #include <QTextStream>
 #include <QTimer>
@@ -279,13 +282,18 @@ int runRendererChild(int argc, char **argv) {
   }
   if (type == QStringLiteral("web")) {
     QByteArray flags = qgetenv("QTWEBENGINE_CHROMIUM_FLAGS");
-    if (!flags.contains("--disable-gpu")) {
-      if (!flags.isEmpty()) {
-        flags += ' ';
-      }
-      flags += "--disable-gpu";
-      qputenv("QTWEBENGINE_CHROMIUM_FLAGS", flags);
-    }
+    const QByteArray extra =
+        QByteArrayLiteral("--disable-background-networking --disable-sync "
+                          "--disable-extensions --disable-component-update "
+                          "--disable-breakpad --disable-speech-api --no-first-run "
+                          "--autoplay-policy=no-user-gesture-required "
+                          "--disable-features=WebRTC,WebUSB,WebBluetooth,"
+                          "LiveCaption,Translation");
+    if (!flags.isEmpty()) flags += ' ';
+    flags += extra;
+    // Tests may set --disable-gpu; do not force it.  WebGL wallpapers need a
+    // real (or SwiftShader) GL context, and frames are read back from canvas.
+    qputenv("QTWEBENGINE_CHROMIUM_FLAGS", flags);
   }
   QApplication app(argc, argv);
   QCommandLineParser parser;
@@ -312,6 +320,9 @@ int runRendererChild(int argc, char **argv) {
                                 QStringLiteral("0|1"));
   QCommandLineOption outputOption(QStringLiteral("output"), QStringLiteral("wl_output name"),
                                   QStringLiteral("name"));
+  QCommandLineOption propertiesOption(QStringLiteral("properties-file"),
+                                      QStringLiteral("Wallpaper Engine properties JSON"),
+                                      QStringLiteral("file"));
   parser.addOption(childOption);
   parser.addOption(typeOption);
   parser.addOption(fileOption);
@@ -323,6 +334,7 @@ int runRendererChild(int argc, char **argv) {
   parser.addOption(speedOption);
   parser.addOption(loopOption);
   parser.addOption(outputOption);
+  parser.addOption(propertiesOption);
   parser.process(app);
 
   RendererSpec spec;
@@ -347,6 +359,16 @@ int runRendererChild(int argc, char **argv) {
   }
   spec.loop = parser.value(loopOption) != QStringLiteral("0");
   spec.output = parser.value(outputOption).trimmed();
+  if (parser.isSet(propertiesOption)) {
+    QFile file(parser.value(propertiesOption));
+    if (file.open(QIODevice::ReadOnly) && file.size() > 0 && file.size() <= 5 * 1024 * 1024) {
+      QJsonParseError parseError;
+      const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+      if (parseError.error == QJsonParseError::NoError && document.isObject()) {
+        spec.properties = document.object();
+      }
+    }
+  }
   if (!spec.output.isEmpty()) {
     const QSize physical = physicalWaylandOutputSize(spec.output);
     if (physical.width() >= 64 && physical.width() <= 3840 &&
@@ -354,6 +376,12 @@ int runRendererChild(int argc, char **argv) {
       spec.width = physical.width();
       spec.height = physical.height();
     }
+  }
+  if (spec.type == QStringLiteral("web") &&
+      (spec.width > 1920 || spec.height > 1080)) {
+    const double scale = qMin(1920.0 / spec.width, 1080.0 / spec.height);
+    spec.width = qBound(64, qRound(spec.width * scale), 1920);
+    spec.height = qBound(64, qRound(spec.height * scale), 1080);
   }
 
   if (qEnvironmentVariable("ANISPAPER_TEST_CRASH_ON_START") == QStringLiteral("1")) {

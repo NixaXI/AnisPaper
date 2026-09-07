@@ -653,6 +653,7 @@ int main (int argc, char* argv []) {
     ::std::filesystem::path projectDir;
     int width = 1920, height = 1080, fps = 60, volume = 0;
     ::std::string scaling = "fill";
+    ::std::vector<::std::string> setProperties;
     for (int i = 1; i < argc; ++i) {
         const ::std::string arg = argv [i];
         if (arg == "--file" && i + 1 < argc) {
@@ -667,6 +668,8 @@ int main (int argc, char* argv []) {
             volume = ::std::stoi (argv [++i]);
         } else if (arg == "--scaling" && i + 1 < argc) {
             scaling = argv [++i];
+        } else if (arg == "--set-property" && i + 1 < argc) {
+            setProperties.emplace_back (argv [++i]);
         }
     }
 
@@ -704,6 +707,10 @@ int main (int argc, char* argv []) {
         assetsDir->string (),
         projectDir.string (),
     };
+    for (const auto& assignment : setProperties) {
+        engineArgs.insert (engineArgs.end () - 1, "--set-property");
+        engineArgs.insert (engineArgs.end () - 1, assignment);
+    }
     // The daemon owns evidence-based Gaming Mode.  A generic fullscreen
     // geometry match (for example an IDE) is not enough to pause a wallpaper;
     // the child receives --no-fullscreen-pause through the environment below.

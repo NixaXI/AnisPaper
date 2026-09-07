@@ -5,6 +5,7 @@
 #include "../renderers/renderer_child.h"
 #include "../renderers/renderer_manager.h"
 #include "../renderers/static_image_renderer.h"
+#include "../renderers/wallpaper_properties.h"
 
 #include <QCoreApplication>
 #include <QBuffer>
@@ -141,6 +142,7 @@ constexpr int kMaxConnections = 32;
 QString configHome() { auto v=qEnvironmentVariable("XDG_CONFIG_HOME"); return v.isEmpty()?QDir::homePath()+"/.config":v; }
 QString settingsPath() { return configHome()+"/anispaper/settings.json"; }
 QString wallpaperStatePath() { return configHome()+"/anispaper/wallpapers.json"; }
+QString wallpaperPropertiesPath() { return configHome()+"/anispaper/wallpaper-properties.json"; }
 QString runtimeDir() { return qEnvironmentVariable("XDG_RUNTIME_DIR"); }
 QString socketPath() { return runtimeDir()+"/anispaper.sock"; }
 bool isWithin(const QString &root, const QString &path) { return path==root || path.startsWith(root+QDir::separator()); }
@@ -281,6 +283,56 @@ bool saveWallpaperState(const QHash<QString, QString> &state, QString *error) {
 
   if (file.write(QJsonDocument(root).toJson(QJsonDocument::Compact)) < 0 ||
       !file.commit()) {
+    if (error) *error = file.errorString();
+    return false;
+  }
+  return true;
+}
+
+QHash<QString, QJsonObject> loadWallpaperProperties() {
+  QHash<QString, QJsonObject> stored;
+  QFile file(wallpaperPropertiesPath());
+  if (!file.exists()) return stored;
+  if (!file.open(QIODevice::ReadOnly) || file.size() > 5 * 1024 * 1024) {
+    qWarning().noquote() << "wallpaper properties unreadable; ignoring them";
+    return {};
+  }
+  QJsonParseError parseError;
+  const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+  if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+    qWarning().noquote() << "wallpaper properties corrupt; ignoring them";
+    return {};
+  }
+  const QJsonObject root = document.object();
+  if (root.value("version").toInt(-1) != 1 || !root.value("wallpapers").isObject()) {
+    qWarning().noquote() << "wallpaper properties have unsupported format; ignoring them";
+    return {};
+  }
+  const QJsonObject wallpapers = root.value("wallpapers").toObject();
+  for (auto it = wallpapers.begin(); it != wallpapers.end(); ++it) {
+    if (!it.value().isObject()) continue;
+    const QString id = it.key().trimmed();
+    if (id.isEmpty() || id.size() > 512) continue;
+    stored.insert(id, it.value().toObject());
+  }
+  return stored;
+}
+
+bool saveWallpaperProperties(const QHash<QString, QJsonObject> &stored, QString *error) {
+  QJsonObject wallpapers;
+  for (auto it = stored.cbegin(); it != stored.cend(); ++it) {
+    wallpapers.insert(it.key(), it.value());
+  }
+  QJsonObject root;
+  root.insert("version", 1);
+  root.insert("wallpapers", wallpapers);
+  QDir().mkpath(QFileInfo(wallpaperPropertiesPath()).absolutePath());
+  QSaveFile file(wallpaperPropertiesPath());
+  if (!file.open(QIODevice::WriteOnly)) {
+    if (error) *error = file.errorString();
+    return false;
+  }
+  if (file.write(QJsonDocument(root).toJson(QJsonDocument::Compact)) < 0 || !file.commit()) {
     if (error) *error = file.errorString();
     return false;
   }
@@ -579,6 +631,7 @@ class Daemon : public QObject {
     settings_ = store_.load();
     renderers_->setGamingMode(settings_.gamingMode);
     savedWallpapers_ = loadWallpaperState();
+    propertyOverrides_ = loadWallpaperProperties();
     registerGamingBus();
     refreshAsync();
   }
@@ -1005,8 +1058,14 @@ class Daemon : public QObject {
 
   QJsonObject catalogItem(const QString &id) const {
     for (const auto value : catalog_) {
-      const auto item = value.toObject();
-      if (item.value("id").toString() == id) return item;
+      auto item = value.toObject();
+      if (item.value("id").toString() == id) {
+        item.insert(QStringLiteral("properties"),
+                    WallpaperProperties::mergeOverrides(
+                        item.value(QStringLiteral("properties")).toObject(),
+                        propertyOverrides_.value(id)));
+        return item;
+      }
     }
     return {};
   }
@@ -1079,7 +1138,17 @@ class Daemon : public QObject {
 
     if (method == "catalog.list") {
       if (!requireObject()) return;
-      reply(catalog_);
+      QJsonArray listed;
+      for (const auto &value : catalog_) {
+        auto item = value.toObject();
+        const QString id = item.value("id").toString();
+        item.insert(QStringLiteral("properties"),
+                    WallpaperProperties::mergeOverrides(
+                        item.value(QStringLiteral("properties")).toObject(),
+                        propertyOverrides_.value(id)));
+        listed.append(item);
+      }
+      reply(listed);
       return;
     }
     if (method == "catalog.refresh") {
@@ -1304,6 +1373,70 @@ class Daemon : public QObject {
       }
       reply(QJsonObject{{"id", idValue}, {"output", output},
                         {"safeMode", renderers_->safeMode(output)}});
+      return;
+    }
+    if (method == "wallpaper.setProperties") {
+      if (!params.isObject()) {
+        fail(-32602, "invalid params");
+        return;
+      }
+      const auto requestParams = params.toObject();
+      const QString idValue = requestParams.value("id").toString().trimmed();
+      const QJsonValue valuesValue = requestParams.value("values");
+      if (idValue.isEmpty() || idValue.size() > 512 || !valuesValue.isObject()) {
+        fail(-32602, "id and values are required");
+        return;
+      }
+      const QJsonObject item = catalogItem(idValue);
+      if (item.isEmpty()) {
+        fail(-32602, "unknown wallpaper id");
+        return;
+      }
+      const QJsonObject schema = item.value("properties").toObject();
+      const QJsonObject incoming = valuesValue.toObject();
+      if (incoming.isEmpty() || incoming.size() > 512) {
+        fail(-32602, "values must be a non-empty object");
+        return;
+      }
+      QJsonObject merged = propertyOverrides_.value(idValue);
+      for (auto it = incoming.begin(); it != incoming.end(); ++it) {
+        const QString key = it.key().trimmed();
+        if (key.isEmpty() || key.size() > 128 || !schema.contains(key)) continue;
+        if (!(it.value().isBool() || it.value().isDouble() || it.value().isString() ||
+              it.value().isNull())) {
+          fail(-32602, "property values must be bool, number or string");
+          return;
+        }
+        if (it.value().isString() && it.value().toString().size() > 4096) {
+          fail(-32602, "property string is too long");
+          return;
+        }
+        merged.insert(key, it.value());
+      }
+      propertyOverrides_.insert(idValue, merged);
+      QString saveError;
+      if (!saveWallpaperProperties(propertyOverrides_, &saveError)) {
+        fail(-32603, "wallpaper properties write failed: " + saveError);
+        return;
+      }
+      RendererOptions options{qBound(1, settings_.fpsCap, 60), settings_.defaultVolume,
+                              settings_.wallpaperScaleMode};
+      QJsonArray applied;
+      const QJsonObject renderStatus = renderers_->status();
+      for (const auto &row : renderStatus.value("outputs").toArray()) {
+        const auto outputRow = row.toObject();
+        if (outputRow.value("wallpaperId").toString() != idValue) continue;
+        const QString output = outputRow.value("output").toString();
+        if (output.isEmpty()) continue;
+        QString applyError;
+        int applyCode = -32001;
+        if (renderers_->apply(catalogItem(idValue), output, options, &applyError, &applyCode)) {
+          applied.append(output);
+        } else {
+          qWarning().noquote() << "property re-apply failed" << output << applyError;
+        }
+      }
+      reply(QJsonObject{{"id", idValue}, {"applied", applied}});
       return;
     }
     if (method == "wallpaper.stop") {
@@ -1635,6 +1768,7 @@ class Daemon : public QObject {
   SettingsStore store_;
   Settings settings_;
   QHash<QString, QString> savedWallpapers_;
+  QHash<QString, QJsonObject> propertyOverrides_;
   QJsonArray catalog_;
   QLocalServer server_;
   QList<Client *> clients_;

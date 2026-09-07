@@ -2,6 +2,7 @@
 
 #include "../bridge/frame_protocol.h"
 #include "../common/wayland_monitor.h"
+#include "wallpaper_properties.h"
 
 #include <QBuffer>
 #include <QCoreApplication>
@@ -12,7 +13,11 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcessEnvironment>
+#include <QRegularExpression>
+#include <QSaveFile>
+#include <QStandardPaths>
 #include <QThread>
+#include <QIODevice>
 
 #include <algorithm>
 #include <csignal>
@@ -187,11 +192,19 @@ bool IsolatedRenderer::start(QString *error) {
   fatalReported_ = false;
   childFailure_.clear();
   input_.clear();
+  int childWidth = spec_.width;
+  int childHeight = spec_.height;
+  if (spec_.type == QStringLiteral("web") &&
+      (childWidth > 1920 || childHeight > 1080)) {
+    const double scale = qMin(1920.0 / childWidth, 1080.0 / childHeight);
+    childWidth = qBound(64, qRound(childWidth * scale), 1920);
+    childHeight = qBound(64, qRound(childHeight * scale), 1080);
+  }
   QString program = QCoreApplication::applicationFilePath();
   QStringList args{QStringLiteral("--renderer-child"), QStringLiteral("--type"),
                    spec_.type, QStringLiteral("--file"), spec_.file,
-                   QStringLiteral("--width"), QString::number(spec_.width),
-                   QStringLiteral("--height"), QString::number(spec_.height),
+                   QStringLiteral("--width"), QString::number(childWidth),
+                   QStringLiteral("--height"), QString::number(childHeight),
                    QStringLiteral("--fps"), QString::number(spec_.fps),
                    QStringLiteral("--volume"), QString::number(spec_.volume, 'f', 3),
                    QStringLiteral("--speed"), QString::number(spec_.speed, 'f', 3),
@@ -214,12 +227,33 @@ bool IsolatedRenderer::start(QString *error) {
                        QStringLiteral("--volume"),
                        QString::number(qBound(0, qRound(spec_.volume * 128.0), 128)),
                        QStringLiteral("--scaling"), scaling};
+    for (const QString &assignment :
+         WallpaperProperties::setPropertyAssignments(spec_.properties)) {
+      args << QStringLiteral("--set-property") << assignment;
+    }
   }
   if (!spec_.preview.isEmpty() && !isScene) {
     args << QStringLiteral("--preview") << spec_.preview;
   }
   if (!spec_.output.isEmpty() && !isScene) {
     args << QStringLiteral("--output") << spec_.output;
+  }
+  if (!isScene && !spec_.properties.isEmpty()) {
+    const QString runtime =
+        QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
+    QString safe = spec_.output;
+    safe.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9._-]")),
+                 QStringLiteral("_"));
+    if (safe.isEmpty()) safe = QStringLiteral("default");
+    const QString path =
+        runtime + QStringLiteral("/anispaper-props-") + safe + QStringLiteral(".json");
+    QDir().mkpath(runtime);
+    QSaveFile file(path);
+    if (file.open(QIODevice::WriteOnly) &&
+        file.write(QJsonDocument(spec_.properties).toJson(QJsonDocument::Compact)) >= 0 &&
+        file.commit()) {
+      args << QStringLiteral("--properties-file") << path;
+    }
   }
 
   QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
@@ -461,11 +495,14 @@ void IsolatedRenderer::parseLine(const QByteArray &line) {
   const QString jpegPayload = message.value(QStringLiteral("jpeg")).toString();
   bool directPublished = false;
   if (jpegPayload.isEmpty()) {
-    // Native Scene frames go straight from the validated child slot to the
-    // output-specific bridge.  The owned QImage route remains the fallback
-    // for unavailable callbacks and layout/metadata incompatibility.
+    // Native Scene/video frames go straight from the validated child slot to
+    // the output-specific bridge.  Web children often render below the
+    // physical wl_output size, so they always copy+scale onto spec_.
     if (profilePicture) stageTimer.restart();
-    const SceneTransportPublishResult direct = publishSceneTransportFrame();
+    const bool webScaled = spec_.type == QStringLiteral("web");
+    const SceneTransportPublishResult direct =
+        webScaled ? SceneTransportPublishResult::Ineligible
+                  : publishSceneTransportFrame();
     if (direct == SceneTransportPublishResult::Published) {
       // No private frame_ memcpy in the eligible direct path.
       directPublished = true;
@@ -473,6 +510,14 @@ void IsolatedRenderer::parseLine(const QByteArray &line) {
       return;
     } else if (!copySceneTransportFrame()) {
       return;
+    }
+    if (!directPublished &&
+        (frame_.width() != spec_.width || frame_.height() != spec_.height) &&
+        spec_.width >= 64 && spec_.height >= 64) {
+      frame_ = frame_
+                   .scaled(spec_.width, spec_.height, Qt::IgnoreAspectRatio,
+                           Qt::FastTransformation)
+                   .convertToFormat(QImage::Format_RGBA8888);
     }
     if (profilePicture) {
       g_parentProfiler.sample(g_parentProfiler.shmCopyMs, stageTimer);
