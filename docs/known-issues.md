@@ -1,3 +1,18 @@
+## OBLIGATORIO — web wallpapers NO son un wallpaper usable
+
+- **Estado**: ❌ no funciona como wallpaper. No seguir “arreglando” esta ruta.
+- **Qué sí se ve bien**: el HTML en una pestaña / preview de browser (compositor
+  en vivo, 60 fps).
+- **Qué falla**: AnisPaper Frame en un output real (p. ej. HDMI-A-1). QtWebEngine
+  no entrega un framebuffer usable al ritmo del escritorio. `QWidget::grab()` en
+  Wayland con la vista oculta pinta mal o a ~10–15 fps; el JPEG/canvas JS pierde
+  el fondo CSS, letterboxea Spine y no llega a 30 fps a 1080p. La pestaña y el
+  Frame nunca van a coincidir con este diseño (screenshot → SHM → Plasma).
+- **Tipos soportados de verdad**: `scene` y `video`. Web queda en el catálogo
+  como experimental/roto; no es un objetivo de calidad.
+- **Fix futuro (no ahora)**: surface live (layer-shell / ventana del compositor),
+  no más readback JPEG ni `grab()` a SHM.
+
 ## F4 — 2026-08-09 (resuelto en F8)
 
 - **Issue**: `libwallpaperengine` no está instalada en esta sesión (`pkg-config

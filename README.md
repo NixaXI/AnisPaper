@@ -24,6 +24,8 @@
 <br>
 
 > **Experimental project. Testers, forks, bug reports and pull requests are welcome.**
+>
+> **Site (free, no domain):** [nixaxi.github.io/AnisPaper](https://nixaxi.github.io/AnisPaper/)
 
 <img src="assets/star-cascade.svg" alt="" width="72%" />
 
@@ -102,8 +104,8 @@ This is still an experimental project, not a polished consumer release.
 | Renderer process isolation | ✅ |
 | Preview RPC | ✅ |
 | `cover` / `fit` / `stretch` scaling | ✅ |
-| Video wallpapers | 🧪 |
-| Web wallpapers | 🧪 |
+| Video wallpapers | ✅ |
+| Web wallpapers | ❌ **No usable.** Preview tab ≠ desktop. See `docs/known-issues.md` (OBLIGATORIO). Do not spend more time on QWebEngine → SHM. |
 | Renderer watchdog / safe-mode plumbing | ✅ |
 | SDDM / login wallpaper integration | 🧪 Experimental |
 | One-click installer | 🚧 Not yet |
