@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AnisPaper — live wallpapers for KDE Plasma 6</title>
+  <meta name="description" content="AnisPaper: live wallpapers for KDE Plasma 6. The heavy renderer runs apart; plasmashell only shows the frame.">
+  <meta property="og:title" content="AnisPaper">
+  <meta property="og:description" content="Live wallpapers for KDE Plasma 6, without making plasmashell do the heavy rendering.">
+  <meta property="og:image" content="assets/banner-anispaper.svg">
+  <link rel="alternate" hreflang="es" href="./">
+  <link rel="alternate" hreflang="en" href="en.html">
+  <link rel="icon" href="assets/anis-star.png">
+  <link rel="preconnect" href="https://fonts.bunny.net">
+  <link href="https://fonts.bunny.net/css?family=fraunces:600,700|ibm-plex-sans:400,600" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <a class="brand" href="#top">
+        <img src="assets/anis-star.png" alt="">
+        Anis Star
+      </a>
+      <nav class="nav">
+        <a href="https://github.com/NixaXI/AnisPaper">GitHub</a>
+        <a href="https://github.com/NixaXI/AnisPaper/releases/latest">Download</a>
+        <a class="lang" href="./" hreflang="es" lang="es">ES</a>
+      </nav>
+    </header>
+
+    <section class="hero" id="top">
+      <div>
+        <p class="kicker">✦ Anis Star ✦</p>
+        <h1>AnisPaper</h1>
+        <p class="lede">
+          Live wallpapers for KDE Plasma 6. The heavy engine runs in another process;
+          Plasma only shows the frame. The desktop moves without taking plasmashell down with it.
+        </p>
+        <div class="cta">
+          <a class="btn primary" href="https://github.com/NixaXI/AnisPaper/releases/latest">Download v0.2.0</a>
+          <a class="btn ghost" href="https://github.com/NixaXI/AnisPaper">Source code</a>
+        </div>
+        <div class="badges">
+          <span class="badge">KDE Plasma 6</span>
+          <span class="badge">Wayland</span>
+          <span class="badge">Scene Engine</span>
+          <span class="badge">Multi-monitor</span>
+          <span class="badge">Linux</span>
+        </div>
+      </div>
+      <img class="star" src="assets/anis-star.png" alt="Anis Star">
+    </section>
+
+    <img class="cascade" src="assets/star-cascade.svg" alt="">
+
+    <figure class="demo">
+      <img src="https://raw.githubusercontent.com/NixaXI/AnisPaper/main/assets/anispaper-demo.gif"
+           alt="AnisPaper running a live wallpaper on Plasma 6"
+           loading="lazy">
+      <figcaption class="caption">AnisPaper on Plasma 6 — frames arrive over shared memory, not embedded in the shell.</figcaption>
+    </figure>
+
+    <section class="split">
+      <div>
+        <h2>Why it exists</h2>
+        <p class="muted">
+          Dropping a Wallpaper Engine runtime inside plasmashell asks the desktop
+          to survive broken shaders, video and Workshop packs. AnisPaper splits the work:
+          native UI, daemon, isolated renderers, and a tiny plugin called AnisPaper Frame.
+        </p>
+      </div>
+      <ul class="list">
+        <li><b>Scene</b><span>Wallpaper Engine type:scene projects, around 60 fps at 1080p when the scene allows it.</span></li>
+        <li><b>Video</b><span>Isolated mpv, VAAPI, a steady 30 fps per monitor.</span></li>
+        <li><b>Multi-monitor</b><span>One wallpaper per output. DP and HDMI stay out of each other's way.</span></li>
+        <li><b>Workshop</b><span>Steam library discovery, catalog and properties.</span></li>
+      </ul>
+    </section>
+
+    <section class="grid">
+      <article class="card">
+        <h3>Not Electron</h3>
+        <p>The UI is Qt. The daemon is native. The scene engine is a separate child.</p>
+      </article>
+      <article class="card">
+        <h3>Plasma does not render</h3>
+        <p>AnisPaper Frame only reads SHM and paints it. If the renderer dies, the shell stays up.</p>
+      </article>
+      <article class="card">
+        <h3>Experimental</h3>
+        <p>Living project. Scene and video are the real path. Forks and reports welcome.</p>
+      </article>
+    </section>
+
+    <section class="dl" id="download">
+      <h2>Try it</h2>
+      <p class="muted">Linux, KDE Plasma 6, Wayland session. Current release: v0.2.0. You can also build from the repo.</p>
+      <pre>git clone https://github.com/NixaXI/AnisPaper.git
+cd AnisPaper
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
+cmake --build build -j"$(nproc)"
+cmake --install build
+systemctl --user daemon-reload
+systemctl --user enable --now anispaper.service</pre>
+    </section>
+
+    <footer>
+      <span>AnisPaper — experimental. No domain: this page lives on free GitHub Pages.</span>
+      <a href="https://github.com/NixaXI/AnisPaper">github.com/NixaXI/AnisPaper</a>
+    </footer>
+  </div>
+</body>
+</html>

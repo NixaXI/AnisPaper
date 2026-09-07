@@ -8,6 +8,8 @@
   <meta property="og:title" content="AnisPaper">
   <meta property="og:description" content="Live wallpapers for KDE Plasma 6, without making plasmashell do the heavy rendering.">
   <meta property="og:image" content="assets/banner-anispaper.svg">
+  <link rel="alternate" hreflang="es" href="./">
+  <link rel="alternate" hreflang="en" href="en.html">
   <link rel="icon" href="assets/anis-star.png">
   <link rel="preconnect" href="https://fonts.bunny.net">
   <link href="https://fonts.bunny.net/css?family=fraunces:600,700|ibm-plex-sans:400,600" rel="stylesheet">
@@ -22,8 +24,8 @@
       </a>
       <nav class="nav">
         <a href="https://github.com/NixaXI/AnisPaper">GitHub</a>
-        <a href="https://github.com/NixaXI/AnisPaper/releases/latest" data-i18n="navDl">Descargar</a>
-        <button class="lang" type="button" id="langBtn">EN</button>
+        <a href="https://github.com/NixaXI/AnisPaper/releases/latest">Descargar</a>
+        <a class="lang" href="en.html" hreflang="en" lang="en">EN</a>
       </nav>
     </header>
 
@@ -104,52 +106,9 @@ systemctl --user enable --now anispaper.service</pre>
     </section>
 
     <footer>
-      <span data-i18n="foot">AnisPaper — experimental. Sin dominio: esta página vive en GitHub Pages, gratis.</span>
+      <span>AnisPaper — experimental. Sin dominio: esta página vive en GitHub Pages, gratis.</span>
       <a href="https://github.com/NixaXI/AnisPaper">github.com/NixaXI/AnisPaper</a>
     </footer>
   </div>
-  <script>
-    const dict = {
-      en: {
-        navDl: "Download", lede: "Live wallpapers for KDE Plasma 6. The heavy renderer runs in another process; Plasma only shows the frame. The desktop moves without taking plasmashell down with it.",
-        ctaDl: "Download v0.2.0", ctaCode: "Source code",
-        demoCap: "AnisPaper on Plasma 6 — frames arrive over shared memory, not embedded in the shell.",
-        whyTitle: "Why it exists",
-        whyBody: "Dropping a Wallpaper Engine runtime inside plasmashell asks the desktop to survive broken shaders, video and Workshop packs. AnisPaper splits the work: native UI, daemon, isolated renderers, and a tiny plugin called AnisPaper Frame.",
-        p1t: "Scene", p1d: "Wallpaper Engine type:scene projects, around 60 fps at 1080p when the scene allows it.",
-        p2t: "Video", p2d: "Isolated mpv, VAAPI, a steady 30 fps per monitor.",
-        p3t: "Multi-monitor", p3d: "One wallpaper per output. DP and HDMI stay out of each other's way.",
-        p4t: "Workshop", p4d: "Steam library discovery, catalog and properties.",
-        c1t: "Not Electron", c1d: "The UI is Qt. The daemon is native. The scene engine is a separate child.",
-        c2t: "Plasma does not render", c2d: "AnisPaper Frame only reads SHM and paints it. If the renderer dies, the shell stays up.",
-        c3t: "Experimental", c3d: "Living project. Scene and video are the real path. Forks and reports welcome.",
-        dlTitle: "Try it",
-        dlBody: "Linux, KDE Plasma 6, Wayland session. Current release: v0.2.0. You can also build from the repo.",
-        foot: "AnisPaper — experimental. No domain: this page lives on free GitHub Pages."
-      }
-    };
-    const btn = document.getElementById("langBtn");
-    let lang = localStorage.getItem("ap-lang") || "es";
-    function apply(next) {
-      lang = next;
-      localStorage.setItem("ap-lang", lang);
-      document.documentElement.lang = lang;
-      btn.textContent = lang === "es" ? "EN" : "ES";
-      document.querySelectorAll("[data-i18n]").forEach((el) => {
-        const key = el.dataset.i18n;
-        if (lang === "es") {
-          if (el.dataset.es) el.textContent = el.dataset.es;
-          return;
-        }
-        if (!el.dataset.es) el.dataset.es = el.textContent;
-        if (dict.en[key]) el.textContent = dict.en[key];
-      });
-      document.title = lang === "es"
-        ? "AnisPaper — wallpapers vivos para KDE Plasma 6"
-        : "AnisPaper — live wallpapers for KDE Plasma 6";
-    }
-    btn.addEventListener("click", () => apply(lang === "es" ? "en" : "es"));
-    if (lang === "en") apply("en");
-  </script>
 </body>
 </html>

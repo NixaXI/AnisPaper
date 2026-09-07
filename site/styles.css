@@ -55,15 +55,14 @@ a:hover { color: var(--gold-2); }
 .nav a { color: var(--muted); }
 .nav a:hover { color: var(--gold); }
 
-.lang {
+a.lang {
   border: 1px solid var(--line);
   background: transparent;
   color: var(--gold);
   border-radius: 999px;
   padding: 6px 12px;
-  cursor: pointer;
-  font: inherit;
 }
+a.lang:hover { color: var(--gold-2); border-color: var(--gold); }
 
 .hero {
   display: grid;
