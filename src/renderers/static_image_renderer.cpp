@@ -1,6 +1,8 @@
 #include "static_image_renderer.h"
 
+#include <QCoreApplication>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QImageReader>
 #include <QPainter>
 #include <QStandardPaths>
@@ -113,11 +115,15 @@ QImage StaticImageRenderer::fallbackFrame(const QString &label, int width,
   painter.setPen(QColor(QStringLiteral("#00C2FF")));
   painter.drawRect(10, 10, safeWidth - 21, safeHeight - 21);
   painter.setPen(QColor(QStringLiteral("#FFD000")));
-  QFont font = painter.font();
-  font.setBold(true);
-  font.setPointSize(qMax(12, safeHeight / 16));
-  painter.setFont(font);
-  painter.drawText(image.rect(), Qt::AlignCenter | Qt::TextWordWrap, label);
+  // drawText/setFont touch QFontDatabase, which aborts a QCoreApplication
+  // daemon (CI, headless). Keep the color bars so the frame is still valid.
+  if (qobject_cast<QGuiApplication *>(QCoreApplication::instance())) {
+    QFont font = painter.font();
+    font.setBold(true);
+    font.setPointSize(qMax(12, safeHeight / 16));
+    painter.setFont(font);
+    painter.drawText(image.rect(), Qt::AlignCenter | Qt::TextWordWrap, label);
+  }
   return image;
 }
 
