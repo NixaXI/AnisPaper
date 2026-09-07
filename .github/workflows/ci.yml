@@ -27,7 +27,6 @@ jobs:
           sudo apt-get install -y \
             build-essential cmake pkg-config ninja-build \
             qt6-base-dev qt6-declarative-dev qt6-webengine-dev \
-            libkf6auth-dev \
             libwayland-dev wayland-protocols \
             libmpv-dev libjpeg-turbo8-dev \
             libglew-dev freeglut3-dev \

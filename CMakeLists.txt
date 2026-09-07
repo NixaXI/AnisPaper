@@ -46,7 +46,7 @@ target_link_libraries(anispaper-layer-shell-probe PRIVATE PkgConfig::WAYLAND_CLI
 target_compile_options(anispaper-layer-shell-probe PRIVATE -Wall -Wextra -Wpedantic)
 
 find_package(Qt6 6.2 REQUIRED COMPONENTS Core Network Gui OpenGL Widgets WebEngineCore WebEngineWidgets WebChannel Quick Qml QuickControls2 DBus)
-find_package(KF6Auth 6.0 REQUIRED)
+find_package(KF6Auth 6.0 QUIET)
 pkg_check_modules(MPV REQUIRED IMPORTED_TARGET mpv)
 pkg_check_modules(JPEG REQUIRED IMPORTED_TARGET libjpeg)
 set(CMAKE_AUTOMOC ON)
@@ -124,7 +124,6 @@ target_link_libraries(anis-paperd PRIVATE
     Qt6::Core
     Qt6::Network
     Qt6::DBus
-    KF6::AuthCore
     Qt6::Gui
     Qt6::OpenGL
     Qt6::Widgets
@@ -134,6 +133,10 @@ target_link_libraries(anis-paperd PRIVATE
     PkgConfig::WAYLAND_CLIENT
     PkgConfig::MPV
 )
+if(KF6Auth_FOUND)
+  target_link_libraries(anis-paperd PRIVATE KF6::AuthCore)
+  target_compile_definitions(anis-paperd PRIVATE ANISPAPER_HAVE_KF6AUTH=1)
+endif()
 target_compile_options(anis-paperd PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(anispaper-plasma-output-map

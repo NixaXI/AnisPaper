@@ -7,9 +7,11 @@
 #include <QThread>
 #include <QVariant>
 
+#if defined(ANISPAPER_HAVE_KF6AUTH)
 #include <KAuth/Action>
 #include <KAuth/ExecuteJob>
 #include <qdbusunixfiledescriptor.h>
+#endif
 
 void installPlasmaLoginWallpaperAsync(const QString &pngPath, QObject *context,
                                        PlasmaLoginWallpaperCallback callback)
@@ -28,6 +30,13 @@ void installPlasmaLoginWallpaperAsync(const QString &pngPath, QObject *context,
         },
         Qt::QueuedConnection);
   };
+#if !defined(ANISPAPER_HAVE_KF6AUTH)
+  Q_UNUSED(pngPath);
+  finish(false, QStringLiteral(
+                    "Plasma Login wallpaper install needs KF6Auth "
+                    "(not packaged on this distro)"));
+  return;
+#else
   const QFileInfo info(pngPath);
   if (!info.isFile() || !info.isReadable()) {
     finish(false, QStringLiteral("Plasma Login wallpaper capture is not readable"));
@@ -101,4 +110,5 @@ void installPlasmaLoginWallpaperAsync(const QString &pngPath, QObject *context,
                    });
   timeout->start();
   job->start();
+#endif
 }
