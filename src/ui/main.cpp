@@ -108,8 +108,11 @@ void registerPreviewScheme() {
   // Do not set LocalScheme: Chromium then treats anispaper:// like file:// and
   // blocks qrc:/ui/index.html from loading thumbs ("Not allowed to load local resource").
   scheme.setFlags(QWebEngineUrlScheme::SecureScheme | QWebEngineUrlScheme::CorsEnabled |
-                  QWebEngineUrlScheme::ContentSecurityPolicyIgnored |
-                  QWebEngineUrlScheme::FetchApiAllowed);
+                  QWebEngineUrlScheme::ContentSecurityPolicyIgnored
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+                  | QWebEngineUrlScheme::FetchApiAllowed
+#endif
+  );
   QWebEngineUrlScheme::registerScheme(scheme);
 }
 
