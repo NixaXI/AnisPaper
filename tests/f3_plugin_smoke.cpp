@@ -134,7 +134,6 @@ Item {
         objectName: "bridgeImage"
         anchors.fill: parent
         cache: false
-        retainWhileLoading: true
         source: "image://anispaper/F3-QML?f=" + parent.frameNo
     }
 }

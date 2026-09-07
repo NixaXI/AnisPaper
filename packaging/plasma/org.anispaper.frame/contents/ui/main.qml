@@ -95,11 +95,13 @@ WallpaperItem {
             mipmap: false
             cache: false
             asynchronous: false
-            // Keep the last uploaded texture while the next provider request
-            // is in flight.  The frame source changes at publication rate;
-            // clearing Image on every URL change exposes the #0A0D14 backing
-            // rectangle for a tick when Plasma's scene graph is busy.
-            retainWhileLoading: true
+            // retainWhileLoading is Qt 6.5+.  Assigning it in the object
+            // literal makes Ubuntu 24.04 (Qt 6.4) refuse to load the wallpaper.
+            Component.onCompleted: {
+                const parts = String(Qt.version).split(".")
+                if (Number(parts[0]) > 6 || (Number(parts[0]) === 6 && Number(parts[1]) >= 5))
+                    retainWhileLoading = true
+            }
             horizontalAlignment: Image.AlignHCenter
             verticalAlignment: Image.AlignVCenter
             source: "image://anispaper/" +
