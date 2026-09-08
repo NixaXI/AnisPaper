@@ -4,36 +4,26 @@
 
 <br>
 
-<img src="assets/star-cascade.svg" alt="" width="72%" />
+<img src="assets/anis-star.png" alt="Anis Star" width="280" />
 
-<br>
+# AnisPaper
 
-<img src="assets/anis-star.png" alt="Anis Star" width="330" />
-
-# ✦ A N I S P A P E R ✦
-
-### Live wallpapers for KDE Plasma — without making `plasmashell` do all the heavy lifting.
+**Live wallpapers for KDE Plasma 6** — without stuffing the heavy renderer inside `plasmashell`.
 
 [![Platform](https://img.shields.io/badge/Platform-Linux-111111?style=for-the-badge&logo=linux&logoColor=FFD54A)](#)
 [![Desktop](https://img.shields.io/badge/Desktop-KDE%20Plasma%206-1D99F3?style=for-the-badge&logo=kde&logoColor=white)](#)
 [![Session](https://img.shields.io/badge/Session-Wayland-222222?style=for-the-badge)](#)
-[![Scene](https://img.shields.io/badge/Scene%20Engine-Working-FFD54A?style=for-the-badge&logoColor=111111)](#)
+[![Scene](https://img.shields.io/badge/Scene-Working-FFD54A?style=for-the-badge)](#)
+[![Video](https://img.shields.io/badge/Video-Working-FFD54A?style=for-the-badge)](#)
+[![Web](https://img.shields.io/badge/Web-Working-FFD54A?style=for-the-badge)](#)
 
-**Wallpaper Engine Scene • Video • Web • Multi-monitor • Shared Memory**
-
-<br>
-
-> **Experimental project. Testers, forks, bug reports and pull requests are welcome.**
->
-> **Site (free, no domain):** [nixaxi.github.io/AnisPaper](https://nixaxi.github.io/AnisPaper/)
-
-<img src="assets/star-cascade.svg" alt="" width="72%" />
+[Website](https://nixaxi.github.io/AnisPaper/) · [Releases](https://github.com/NixaXI/AnisPaper/releases) · [Issues](https://github.com/NixaXI/AnisPaper/issues)
 
 </div>
 
 ---
 
-## ✦ Demo
+## Demo
 
 <div align="center">
 
@@ -43,718 +33,181 @@
 
 </div>
 
----
-
-## ✦ What is AnisPaper?
-
-**AnisPaper** is an experimental live-wallpaper stack for **KDE Plasma 6**, built around one idea:
-
-> **Make the desktop move without making Plasma do all the heavy rendering work.**
-
-Instead of embedding the expensive renderer directly inside `plasmashell`, AnisPaper splits the work into separate components:
-
-- ★ a native Qt Quick control UI (`anis-paper-ui`, no Electron)
-- ★ a native daemon: `anis-paperd`
-- ★ isolated renderers
-- ★ a dedicated Wallpaper Engine Scene process
-- ★ shared-memory frame transport
-- ★ a minimal Plasma wallpaper plugin called **AnisPaper Frame**
-
-The goal is to keep rendering failures away from the desktop shell while still making animated wallpapers feel like a native part of Plasma.
+> Experimental. Built for testers who care about Plasma staying alive when a wallpaper misbehaves.
 
 ---
 
-## ★ Current milestone
+## What it does
 
-The current Scene path is working end-to-end:
+AnisPaper splits the stack so the shell does not do the expensive work:
+
+| Piece | Role |
+| --- | --- |
+| **anis-paper-ui** | Qt Quick control room (no Electron) |
+| **anis-paperd** | Daemon / catalog / monitor mapping |
+| Isolated renderers | Scene · video · web |
+| **AnisPaper Frame** | Thin Plasma plugin — shows frames via shared memory |
+
+Heavy rendering stays in separate processes. Plasma mostly displays the current frame.
+
+On the original setup, Wallpaper Engine Scene projects have hit about **58–60 FPS at 1080p** when the scene allows it.
 
 ```text
-Wallpaper Engine Scene
+Wallpaper Engine Scene / Video / Web
         ↓
-anis-paper-scene-engine
-        ↓
-offscreen GPU framebuffer
+isolated renderer
         ↓
 shared-memory transport
         ↓
-anis-paperd / per-output bridge
-        ↓
-AnisPaper Frame
-        ↓
-KDE Plasma
+AnisPaper Frame → KDE Plasma
 ```
-
-On the original development setup, real Wallpaper Engine Scene projects have been rendered at roughly **58–60 FPS at 1920×1080**.
-
-This is still an experimental project, not a polished consumer release.
 
 ---
 
-## ✦ Features
+## Status
 
 | Feature | Status |
-|---|---|
-| KDE Plasma 6 | ✅ |
-| Wayland target | ✅ |
-| Per-monitor wallpaper selection | ✅ |
-| Steam library discovery | ✅ |
-| Multiple Steam libraries | ✅ |
-| Wallpaper Engine Scene projects | ✅ Experimental / working |
-| Shared-memory Scene transport | ✅ |
-| Renderer process isolation | ✅ |
-| Preview RPC | ✅ |
-| `cover` / `fit` / `stretch` scaling | ✅ |
-| Video wallpapers | ✅ |
-| Web wallpapers | ❌ **No usable.** Preview tab ≠ desktop. See `docs/known-issues.md` (OBLIGATORIO). Do not spend more time on QWebEngine → SHM. |
-| Renderer watchdog / safe-mode plumbing | ✅ |
-| SDDM / login wallpaper integration | 🧪 Experimental |
-| One-click installer | 🚧 Not yet |
+| --- | --- |
+| KDE Plasma 6 / Wayland | Working |
+| Multi-monitor | Working |
+| Steam library discovery | Working |
+| Wallpaper Engine **Scene** | Working (experimental) |
+| **Video** (mpv, isolated) | Working |
+| **Web** on the desktop | Working |
+| Packaged installer / AppImage | In progress |
+| Gaming Mode | Rough — see [open issues](https://github.com/NixaXI/AnisPaper/issues) |
+
+AnisPaper does **not** ship Steam Workshop content or Wallpaper Engine proprietary assets. You need your own Steam + Wallpaper Engine install for Scene Workshop items.
 
 ---
 
-## ★ Architecture
+## Install
 
-```mermaid
-flowchart LR
-    UI["✦ anis-paper-ui (Qt Quick)"] -->|"JSON-RPC"| D["anis-paperd"]
-    D --> C["Catalog + settings"]
-    D --> M["Monitor mapping"]
-    D --> R["Isolated renderer manager"]
-    R --> S["anis-paper-scene-engine"]
-    S --> G["Offscreen GPU framebuffer"]
-    G --> SHM["Shared-memory transport"]
-    SHM --> B["Per-output frame bridge"]
-    B --> P["AnisPaper Frame"]
-    P --> K["KDE Plasma / Wayland desktop"]
-```
+### Packaged build
 
-### Why separate processes?
+Check [Releases](https://github.com/NixaXI/AnisPaper/releases) for tagged archives (`v0.2.0` is a Linux x86_64 tarball). An **AppImage** is in the works.
 
-A live wallpaper can contain broken assets, shaders, scripts or unsupported content.
-
-AnisPaper tries to keep those failures away from `plasmashell`:
-
-```text
-broken wallpaper
-      ↓
-renderer process fails
-      ↓
-daemon detects the failure
-      ↓
-Plasma stays alive
-```
-
-That separation is one of the core goals of the project.
-
----
-
-# ✦ Installation
-
-> **Current installation method: build from source.**
->
-> A packaged installer / distro package is planned later. For now, AnisPaper is aimed at testers and contributors who are comfortable building software.
-
----
-
-## ★ 1. Requirements
-
-### Desktop
-
-Recommended/currently targeted:
-
-- Linux
-- **KDE Plasma 6**
-- **Wayland**
-- an OpenGL-capable GPU
-- Steam
-- a legitimate installation of **Wallpaper Engine** for Wallpaper Engine Scene content
-
-AnisPaper does **not** include Steam Workshop wallpapers or Wallpaper Engine proprietary assets.
-
-### Build dependencies
-
-The native project currently uses:
-
-- CMake
-- a C/C++20 toolchain
-- `pkg-config`
-- Wayland client libraries
-- Qt 6
-- KDE Frameworks 6 components
-- OpenGL / EGL
-- GLEW
-- mpv
-- FFmpeg
-- SDL2
-- LZ4
-- libjpeg
-- PulseAudio libraries
-- Freetype
-- DBus
-- X11 development libraries
-
-### UI dependencies
-
-The control room is `anis-paper-ui` (Qt Quick). It is built with the rest of the
-project; no Node.js or Electron is required to use AnisPaper.
-
----
-
-## ★ 2. Arch Linux / CachyOS dependency example
-
-AnisPaper is currently developed primarily on an Arch-family environment.
-
-A practical dependency set is:
+### Build from source (Arch / CachyOS)
 
 ```bash
 sudo pacman -S --needed \
   base-devel cmake pkgconf \
   qt6-base qt6-declarative qt6-webengine \
-  kauth \
-  wayland \
+  kauth wayland \
   mpv libjpeg-turbo \
   mesa glew freeglut \
   sdl2 lz4 ffmpeg libpulse freetype2 dbus \
   libx11 libxrandr libxinerama libxcursor libxi libxxf86vm
-```
 
-Package names may differ on other distributions.
-
-If CMake reports a missing package, use the CMake error as the source of truth for your system.
-
----
-
-## ✦ 3. Clone AnisPaper
-
-```bash
 git clone https://github.com/NixaXI/AnisPaper.git
 cd AnisPaper
-```
 
-The currently required third-party renderer sources are stored under:
-
-```text
-third_party/
-```
-
----
-
-## ★ 4. Configure a local user installation
-
-A local prefix avoids installing development builds system-wide:
-
-```bash
 cmake -S . -B build \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$HOME/.local"
-```
 
----
-
-## ✦ 5. Build
-
-```bash
 cmake --build build -j"$(nproc)"
-```
-
-Important targets include:
-
-```text
-anis-paperd
-anis-paper-scene-engine
-anispaperframeprovider
-anispaper-plasma-output-map
-```
-
-The first Scene build can take a while because the vendored rendering stack also has to compile.
-
----
-
-## ★ 6. Install the native components
-
-```bash
 cmake --install build
 ```
 
-With `-DCMAKE_INSTALL_PREFIX="$HOME/.local"`, the major pieces are installed under your user account.
+Other distros: use CMake’s missing-package errors as the source of truth for package names.
 
-Typical locations include:
-
-```text
-~/.local/bin/anis-paperd
-~/.local/bin/anis-paper-scene-engine
-~/.local/bin/anispaper-plasma-output-map
-
-~/.local/share/plasma/wallpapers/org.anispaper.frame/
-
-~/.local/share/systemd/user/anispaper.service
-```
-
-No `sudo` should be required for this local-prefix install.
-
----
-
-## ✦ 7. Start the daemon
-
-Reload user systemd units:
+### Start the daemon
 
 ```bash
 systemctl --user daemon-reload
-```
-
-Enable and start AnisPaper:
-
-```bash
 systemctl --user enable --now anispaper.service
-```
-
-Check its status:
-
-```bash
 systemctl --user status anispaper.service
 ```
 
-Live logs:
+Logs:
 
 ```bash
 journalctl --user -u anispaper.service -f
 ```
 
----
+### Use it
 
-## ★ 8. Run the Qt control room
+1. Open **AnisPaper** from the app menu, or run `anis-paper-ui`.
+2. Desktop → Configure Desktop and Wallpaper → wallpaper type → **AnisPaper Frame**.
+3. Pick a wallpaper in the AnisPaper UI and apply it to an output (`DP-1`, `HDMI-A-1`, …).
 
-After install, launch **AnisPaper** from the app menu or:
-
-```bash
-anis-paper-ui
-```
-
-The binary talks JSON-RPC to `anis-paperd` over `$XDG_RUNTIME_DIR/anispaper.sock`.
-It does not start Electron, Chromium, Node or Vite.
+Local install lands under `~/.local` (binaries, Plasma plugin, user systemd unit). No `sudo` for that prefix.
 
 ---
 
-## ✦ 9. Select AnisPaper Frame in Plasma
+## Steam / Wallpaper Engine
 
-Open:
+AnisPaper looks for `libraryfolders.vdf` in common places (`~/.steam/...`, `~/.local/share/Steam/...`) and can span multiple libraries.
 
-```text
-Right click desktop
-→ Configure Desktop and Wallpaper
-→ Wallpaper type
-→ AnisPaper Frame
-```
-
-If **AnisPaper Frame** is already active, you do not need to change it again.
-
-Wallpaper selection happens in the **AnisPaper application**. The Plasma plugin itself is intentionally minimal.
-
----
-
-## ★ 10. Apply a wallpaper
-
-Start the UI and:
-
-1. wait for the catalog to finish scanning
-2. select a wallpaper
-3. select the target monitor/output
-4. choose a scale mode if needed
-5. apply it
-
-Typical output names may look like:
-
-```text
-DP-1
-DP-2
-HDMI-A-1
-```
-
----
-
-# ✦ Steam / Wallpaper Engine setup
-
-## ★ Default Steam discovery
-
-AnisPaper looks for Steam's `libraryfolders.vdf` in common Linux locations such as:
-
-```text
-~/.steam/steam/steamapps/libraryfolders.vdf
-~/.local/share/Steam/steamapps/libraryfolders.vdf
-```
-
-It reads Steam's library configuration and can discover Workshop content across multiple Steam libraries.
-
-Wallpaper Engine Workshop content uses Steam app ID:
-
-```text
-431960
-```
-
----
-
-## ✦ Non-standard Steam location
-
-If your `libraryfolders.vdf` is somewhere unusual, set:
-
-```text
-ANISPAPER_STEAM_VDF
-```
-
-For a user systemd service:
+If Steam lives somewhere odd:
 
 ```bash
 systemctl --user edit anispaper.service
 ```
-
-Add:
 
 ```ini
 [Service]
 Environment="ANISPAPER_STEAM_VDF=/path/to/steamapps/libraryfolders.vdf"
 ```
 
-Then:
-
-```bash
-systemctl --user daemon-reload
-systemctl --user restart anispaper.service
-```
-
-Check the logs afterward:
-
-```bash
-journalctl --user -u anispaper.service -n 100 --no-pager
-```
+Then reload and restart the user service.
 
 ---
 
-# ✦ Troubleshooting
+## Troubleshooting
 
-## ★ AnisPaper Frame does not appear in Plasma
+| Symptom | Things to try |
+| --- | --- |
+| AnisPaper Frame missing | `ls ~/.local/share/plasma/wallpapers/org.anispaper.frame` — reopen wallpaper settings |
+| Daemon won’t start | `systemctl --user status anispaper.service` + journal; `which anis-paperd` |
+| Steam wallpapers missing | Confirm VDF path / `ANISPAPER_STEAM_VDF`; Workshop download finished |
+| Scene `renderer unavailable` | Logs; `ls ~/.local/bin/anis-paper-scene-engine`; try another scene; re-download Workshop item |
+| Noisy UI renderer errors | Known cleanup area — note if the wallpaper still draws |
 
-Verify the plugin installation:
-
-```bash
-ls ~/.local/share/plasma/wallpapers/org.anispaper.frame
-```
-
-If you just installed it while Plasma was already running, re-open the wallpaper configuration page.
-
-Avoid restarting `plasmashell` unless you actually need to.
+When filing a bug, include distro, Plasma version, Wayland/X11, GPU/driver, outputs, wallpaper type/ID, and recent journal lines. Don’t attach copyrighted Workshop project files.
 
 ---
 
-## ★ Daemon does not start
+## Contributing
 
-Check:
+Bugs, patches, packaging help, and Plasma-edge cases are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md).
 
-```bash
-systemctl --user status anispaper.service
-```
+Prefer small, reviewable PRs. AI-assisted patches are fine if you say so and still own the diff (test it, no secrets, no blind dumps).
 
-and:
-
-```bash
-journalctl --user -u anispaper.service -n 200 --no-pager
-```
-
-Also verify:
-
-```bash
-which anis-paperd
-```
-
-For a `$HOME/.local` install it should normally resolve to:
-
-```text
-~/.local/bin/anis-paperd
-```
+Help wanted especially around: more GPUs, Scene compatibility reports, packaging, and Gaming Mode edge cases.
 
 ---
 
-## ✦ Steam wallpapers are missing
-
-Check whether Steam's VDF exists:
-
-```bash
-ls ~/.local/share/Steam/steamapps/libraryfolders.vdf
-```
-
-or:
-
-```bash
-ls ~/.steam/steam/steamapps/libraryfolders.vdf
-```
-
-If Steam lives elsewhere, configure `ANISPAPER_STEAM_VDF`.
-
----
-
-## ★ A Scene says `renderer unavailable`
-
-Possible causes include:
-
-- unsupported wallpaper content
-- missing assets
-- damaged/incomplete Workshop download
-- missing `anis-paper-scene-engine`
-- Scene initialization failure
-
-Check:
-
-```bash
-journalctl --user -u anispaper.service -n 200 --no-pager
-```
-
-And verify:
-
-```bash
-ls -lh ~/.local/bin/anis-paper-scene-engine
-```
-
-A single broken Workshop item does not necessarily mean the renderer itself is broken.
-
----
-
-## ✦ A Workshop wallpaper looks corrupted
-
-Workshop downloads can occasionally be incomplete or locally corrupted.
-
-If one item fails while other Scene wallpapers work, try letting Steam re-download that Workshop item rather than modifying its package manually.
-
-AnisPaper does not attempt to reconstruct missing proprietary Workshop data.
-
----
-
-## ★ UI shows repeated `renderer unavailable` messages
-
-The current development UI can still produce noisy RPC errors for renderer-unavailable states.
-
-This is a known cleanup area.
-
-If the active wallpaper still renders correctly, include the exact error and reproduction steps when opening an Issue.
-
----
-
-# ★ Development
-
-## Native debug build
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j"$(nproc)"
-```
-
-## Tests
-
-```bash
-ctest --test-dir build --output-on-failure
-```
-
-There are tests around areas including:
-
-- Plasma output mapping
-- wallpaper activation
-- Scene transport
-- static image rendering
-- renderer cleanup
-- SDDM helpers
-
----
-
-## ✦ UI development
-
-The control room is the Qt Quick binary. After a normal CMake install:
-
-```bash
-anis-paper-ui
-```
-
-The `ui/` directory is a retired Electron client. `npm run start` / `npm run dev` exit with an error on purpose.
-
----
-
-# ★ Help wanted
-
-AnisPaper has been tested on a limited hardware/software set so far.
-
-We are especially looking for:
-
-- ★ NVIDIA testers
-- ★ Intel GPU testers
-- ★ AMD testers on different Mesa versions
-- ★ Plasma / QML contributors
-- ★ multi-monitor bug reports
-- ★ Scene compatibility reports
-- ★ Video / Web renderer improvements
-- ★ packaging help
-- ★ CI / release automation
-- ★ documentation improvements
-
-Found something broken?
-
-**Open an Issue.**
-
-Know how to fix it?
-
-**Fork the project and send a Pull Request.** ★
-
----
-
-# ✦ Reporting a rendering bug
-
-Please include:
-
-```text
-Distribution:
-Plasma version:
-Session: Wayland / X11
-GPU:
-Driver:
-Outputs:
-Wallpaper type: Scene / Video / Web
-Wallpaper ID:
-Does preview.frame look correct?:
-Does the renderer remain alive?:
-```
-
-Useful logs:
-
-```bash
-journalctl --user -u anispaper.service -n 200 --no-pager
-```
-
-Please do not attach copyrighted Workshop project files to Issues.
-
----
-
-# ★ Contributing
-
-Forks and pull requests are welcome.
-
-Read:
-
-[CONTRIBUTING.md](CONTRIBUTING.md)
-
-before submitting a PR.
-
-A good contribution should be:
-
-- understandable
-- focused
-- tested
-- reviewable
-- free of personal paths/secrets
-- respectful of third-party licenses
-
----
-
-## ✦ AI-assisted contributions
-
-AI-assisted development is allowed.
-
-The rule is simple:
-
-> **AI-assisted code is held to the same standard as human-written code.**
-
-Contributors remain responsible for:
-
-- understanding what they submit
-- reviewing the diff
-- testing it
-- keeping secrets/private data out
-- checking license compatibility
-- maintaining the submitted code
-
-Blind generated dumps are not useful contributions.
-
----
-
-# ★ Uninstall
-
-Stop and disable the daemon:
+## Uninstall
 
 ```bash
 systemctl --user disable --now anispaper.service
-```
 
-Remove the installed local components:
-
-```bash
-rm -f ~/.local/bin/anis-paperd
-rm -f ~/.local/bin/anis-paper-scene-engine
-rm -f ~/.local/bin/anispaper-plasma-output-map
-
+rm -f ~/.local/bin/anis-paperd \
+      ~/.local/bin/anis-paper-scene-engine \
+      ~/.local/bin/anispaper-plasma-output-map
 rm -rf ~/.local/share/plasma/wallpapers/org.anispaper.frame
 rm -f ~/.local/share/systemd/user/anispaper.service
-rm -rf ~/.local/libexec/anispaper
-rm -rf ~/.local/share/anispaper
-```
+rm -rf ~/.local/libexec/anispaper ~/.local/share/anispaper
 
-Reload user systemd:
-
-```bash
 systemctl --user daemon-reload
 ```
 
 ---
 
-# ✦ Project status
+## License / third-party
 
-AnisPaper is **experimental**.
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The Scene path vendors/customizes [Almamu/linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine) — keep those licenses intact.
 
-Current priorities include:
-
-- [ ] quieter handling of expected `renderer unavailable` RPC states
-- [ ] better installer / package flow
-- [ ] wider Scene compatibility testing
-- [ ] stronger Video / Web testing
-- [ ] more GPU coverage
-- [ ] automated CI
-- [ ] first tagged alpha release
-- [ ] more screenshots / showcase material
-
----
-
-# ★ Third-party software & licensing
-
-AnisPaper includes and integrates third-party open-source components.
-
-The Scene renderer uses a vendored/customized copy of:
-
-**Almamu/linux-wallpaperengine**
-
-Third-party license files must remain intact.
-
-See:
-
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
-
-for repository notices.
-
-AnisPaper does **not** distribute:
-
-- Wallpaper Engine proprietary assets
-- Steam Workshop wallpapers
-- downloaded Workshop project data
-
-The project is independent and is not affiliated with Valve, Steam, Wallpaper Engine, KDE, Shift Up, Level Infinite, or wallpaper creators.
-
-The `anis-star.png` artwork used for project presentation is separate from the software license; character/game artwork remains owned by its respective rights holders.
+Wallpaper Engine / Steam Workshop assets stay under their own terms and are **not** redistributed here. AnisPaper is independent and not affiliated with Valve, Steam, Wallpaper Engine, or KDE.
 
 ---
 
 <div align="center">
 
-<img src="assets/star-cascade.svg" alt="" width="78%" />
-
-## ✦ STAR POWERED ✦
-
 **Make the desktop move. Keep Plasma alive.**
 
-### ★ Test it • Break it • Report it • Improve it ★
-
-<img src="assets/star-cascade.svg" alt="" width="78%" />
+[Website](https://nixaxi.github.io/AnisPaper/) · [Releases](https://github.com/NixaXI/AnisPaper/releases) · [Issues](https://github.com/NixaXI/AnisPaper/issues)
 
 </div>
