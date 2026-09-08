@@ -35,6 +35,11 @@ class RendererManager final : public QObject {
   QString wallpaperId(const QString &output) const;
   QJsonObject status() const;
   void setGamingMode(const QString &mode);
+  // User Gaming Mode blacklist: case-insensitive substrings matched against
+  // each non-skipped process' cmdline + exe target (e.g. "sober").  Patterns
+  // are normalized (trimmed, lowercased, 2..128 chars, max 64) here so a
+  // one-char typo can never match the whole process table.
+  void setGamingBlacklist(const QStringList &patterns);
   void setPlaybackOptions(int fps, double volume);
   // Fed by the KWin script over D-Bus (see packaging/kwin): the set of outputs
   // whose wallpaper is currently covered by a fullscreen (or maximized, when
@@ -90,7 +95,8 @@ class RendererManager final : public QObject {
   static int stableWindowMs();
   static int startupWindowMs(const RendererSpec &spec, bool sceneNativeUnsupported);
   static int scaledDelayMs(int seconds);
-  static bool steamGameRunning(QString *reason = nullptr);
+  static bool steamGameRunning(const QStringList &blacklist,
+                               QString *reason = nullptr);
   void refreshGamingState();
   QHash<QString, Entry *> byOutput_;
   QHash<QString, QSet<QString>> outputsByWallpaperId_;
@@ -98,6 +104,7 @@ class RendererManager final : public QObject {
   quint64 nextSerial_ = 1;
   QTimer *gamingTimer_ = nullptr;
   QString gamingMode_ = QStringLiteral("auto");
+  QStringList gamingBlacklist_;
   bool gamingActive_ = false;
   // Outputs the KWin script reports as covered; empty when nothing covers a
   // wallpaper.

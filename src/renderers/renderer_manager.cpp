@@ -313,6 +313,19 @@ void RendererManager::setGamingMode(const QString &mode) {
   refreshGamingState();
 }
 
+void RendererManager::setGamingBlacklist(const QStringList &patterns) {
+  QStringList normalized;
+  for (const QString &raw : patterns) {
+    const QString pattern = raw.trimmed().toLower();
+    if (pattern.size() < 2 || pattern.size() > 128) continue;
+    if (!normalized.contains(pattern)) normalized << pattern;
+    if (normalized.size() >= 64) break;
+  }
+  if (normalized == gamingBlacklist_) return;
+  gamingBlacklist_ = normalized;
+  refreshGamingState();
+}
+
 void RendererManager::setPlaybackOptions(int fps, double volume) {
   const int boundedFps = qBound(1, fps, 60);
   const double boundedVolume = qBound(0.0, volume, 1.0);
@@ -324,7 +337,8 @@ void RendererManager::setPlaybackOptions(int fps, double volume) {
   }
 }
 
-bool RendererManager::steamGameRunning(QString *reason) {
+bool RendererManager::steamGameRunning(const QStringList &blacklist,
+                                        QString *reason) {
   if (reason) reason->clear();
   QDir proc(QStringLiteral("/proc"));
   const QString self = QString::number(static_cast<qint64>(::getpid()));
@@ -385,6 +399,22 @@ bool RendererManager::steamGameRunning(QString *reason) {
         command.contains(QStringLiteral("/compatdata/"))) {
       return detected(QStringLiteral("Proton compatdata process"));
     }
+    // User Gaming Mode blacklist (settings): substring match against cmdline
+    // and exe target.  Checked after the AnisPaper/helper skips above so a
+    // pattern can never match our own processes.  This is how non-Steam
+    // runtimes without Steam evidence (e.g. the Sober Android emulator,
+    // whose Wine processes carry no SteamAppId/steamapps paths) get Gaming
+    // Mode on demand.
+    if (!blacklist.isEmpty()) {
+      const QString hayCommand = command.toLower();
+      const QString hayExe = executable.toLower();
+      for (const QString &pattern : blacklist) {
+        if (pattern.isEmpty()) continue;
+        if (hayCommand.contains(pattern) || hayExe.contains(pattern)) {
+          return detected(QStringLiteral("gaming blacklist pattern '%1'").arg(pattern));
+        }
+      }
+    }
   }
   if (reason) *reason = QStringLiteral("no qualifying Steam/Proton process");
   return false;
@@ -410,7 +440,7 @@ void RendererManager::refreshGamingState() {
     pauseAll = true;
     reason = QStringLiteral("settings gamingMode=on");
   } else if (gamingMode_ == QStringLiteral("auto")) {
-    pauseAll = steamGameRunning(&reason);
+    pauseAll = steamGameRunning(gamingBlacklist_, &reason);
   } else {
     reason = QStringLiteral("settings gamingMode=off");
   }
@@ -578,7 +608,7 @@ void RendererManager::createRenderer(Entry *entry, bool staticFallback) {
   const bool pauseThisOutput =
       gamingMode_ == QStringLiteral("on") ||
       (gamingMode_ != QStringLiteral("off") &&
-       (coveredOutputs_.contains(entry->output) || steamGameRunning()));
+       (coveredOutputs_.contains(entry->output) || steamGameRunning(gamingBlacklist_)));
   if (pauseThisOutput && !staticFallback) {
     renderer->pause();
     entry->occluded = true;
