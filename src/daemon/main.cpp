@@ -163,23 +163,46 @@ struct Settings {
   int retryQuota=3;
   QString wallpaperScaleMode=QStringLiteral("cover");
   QString gamingMode=QStringLiteral("auto");
+  // User-configured Gaming Mode blacklist: case-insensitive substrings
+  // matched against /proc cmdline + exe target (e.g. "sober" for the
+  // Sober Android emulator, whose Wine processes carry no Steam evidence).
+  // Capped at 64 entries of 128 chars; patterns shorter than 2 chars are
+  // dropped because they would match nearly every process.
+  QStringList gamingBlacklist;
   bool corrupt=false;
 };
 bool validGamingMode(const QString &value) {
   return value == QStringLiteral("auto") || value == QStringLiteral("on") ||
          value == QStringLiteral("off");
 }
+bool parseGamingBlacklist(const QJsonValue &value, QStringList *out) {
+  if (!value.isArray()) return false;
+  QStringList patterns;
+  for (const auto &entry : value.toArray()) {
+    if (!entry.isString()) return false;
+    const QString pattern = entry.toString().trimmed().toLower();
+    if (pattern.isEmpty()) continue;
+    if (pattern.size() < 2 || pattern.size() > 128) return false;
+    if (!patterns.contains(pattern)) patterns << pattern;
+    if (patterns.size() > 64) return false;
+  }
+  if (out) *out = patterns;
+  return true;
+}
 QJsonObject asJson(const Settings&s) {
   QJsonArray roots;
   for(const auto&x:s.customFolders) roots.append(x);
   QJsonArray favorites;
   for(const auto&x:s.favorites) favorites.append(x);
+  QJsonArray blacklist;
+  for(const auto&x:s.gamingBlacklist) blacklist.append(x);
   return {{"customFolders",roots},
           {"favorites",favorites},
           {"fpsCap",s.fpsCap},
           {"defaultVolume",s.defaultVolume},
           {"retryQuota",s.retryQuota},
           {"gamingMode",s.gamingMode},
+          {"gamingBlacklist",blacklist},
           {"wallpaper", QJsonObject{{"scaleMode", s.wallpaperScaleMode}}}};
 }
 
@@ -189,12 +212,18 @@ class SettingsStore {
     Settings s; QFile f(settingsPath()); if(!f.exists()) return s;
     if(!f.open(QIODevice::ReadOnly) || f.size()>5*1024*1024) return bad("settings unreadable or oversized");
     QJsonParseError e; auto d=QJsonDocument::fromJson(f.readAll(),&e); if(e.error!=QJsonParseError::NoError || !d.isObject()) return bad("settings corrupt: "+e.errorString());
-    auto o=d.object(); const QSet<QString> known{"customFolders","favorites","fpsCap","defaultVolume","retryQuota","gamingMode","wallpaper"}; for(auto it=o.begin();it!=o.end();++it) if(!known.contains(it.key())) return bad("settings has unknown fields");
+    auto o=d.object(); const QSet<QString> known{"customFolders","favorites","fpsCap","defaultVolume","retryQuota","gamingMode","gamingBlacklist","wallpaper"}; for(auto it=o.begin();it!=o.end();++it) if(!known.contains(it.key())) return bad("settings has unknown fields");
     if(!o.value("customFolders").isArray() || !integerJson(o.value("fpsCap"),1,240) || !o.value("defaultVolume").isDouble() || o.value("defaultVolume").toDouble()<0 || o.value("defaultVolume").toDouble()>1 || !integerJson(o.value("retryQuota"),0,10)) return bad("settings values invalid");
     if (o.contains("favorites") && !o.value("favorites").isArray()) return bad("settings favorites invalid");
     if (o.contains("gamingMode") &&
         (!o.value("gamingMode").isString() ||
          !validGamingMode(o.value("gamingMode").toString()))) return bad("settings gamingMode invalid");
+    if (o.contains("gamingBlacklist")) {
+      QStringList patterns;
+      if (!parseGamingBlacklist(o.value("gamingBlacklist"), &patterns))
+        return bad("settings gamingBlacklist invalid");
+      s.gamingBlacklist = patterns;
+    }
     if (o.contains("wallpaper")) {
       const auto wallpaper=o.value("wallpaper");
       if(!wallpaper.isObject()) return bad("settings wallpaper invalid");
@@ -630,6 +659,7 @@ class Daemon : public QObject {
             [this](const QJsonObject &event) { broadcast("wallpaper.safeMode", event); });
     settings_ = store_.load();
     renderers_->setGamingMode(settings_.gamingMode);
+    renderers_->setGamingBlacklist(settings_.gamingBlacklist);
     savedWallpapers_ = loadWallpaperState();
     propertyOverrides_ = loadWallpaperProperties();
     registerGamingBus();
@@ -1216,7 +1246,8 @@ class Daemon : public QObject {
       for (auto it = patch.begin(); it != patch.end(); ++it) {
         if (it.key() != "favorites" && it.key() != "fpsCap" && it.key() != "defaultVolume" &&
             it.key() != "retryQuota" && it.key() != "wallpaper.scaleMode" &&
-            it.key() != "wallpaper" && it.key() != "gamingMode") {
+            it.key() != "wallpaper" && it.key() != "gamingMode" &&
+            it.key() != "gamingBlacklist") {
           fail(-32602, "unknown or immutable setting");
           return;
         }
@@ -1281,6 +1312,14 @@ class Daemon : public QObject {
         }
         next.gamingMode = mode.toString();
       }
+      if (patch.contains("gamingBlacklist")) {
+        QStringList patterns;
+        if (!parseGamingBlacklist(patch.value("gamingBlacklist"), &patterns)) {
+          fail(-32602, "gamingBlacklist must be an array of 2..128 char strings (max 64)");
+          return;
+        }
+        next.gamingBlacklist = patterns;
+      }
       if (patch.contains("wallpaper.scaleMode") || patch.contains("wallpaper")) {
         QJsonValue mode;
         if (patch.contains("wallpaper.scaleMode")) {
@@ -1308,6 +1347,7 @@ class Daemon : public QObject {
       settings_ = next;
       settings_.corrupt = false;
       renderers_->setGamingMode(settings_.gamingMode);
+      renderers_->setGamingBlacklist(settings_.gamingBlacklist);
       renderers_->setPlaybackOptions(qBound(1, settings_.fpsCap, 60),
                                      settings_.defaultVolume);
       reply(asJson(settings_));
