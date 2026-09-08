@@ -216,7 +216,12 @@ img{display:block;max-width:100%}
   transition:transform var(--t) var(--eo), opacity var(--t) var(--eo), border-color var(--t) var(--eo);
 }
 .card:hover{transform:translateY(-3px);opacity:1;border-color:rgba(247,244,240,.22)}
-.card.on{border-color:var(--pink);opacity:1;box-shadow:0 0 0 1px var(--pink), 0 12px 28px rgba(0,0,0,.4)}
+.card.on{border-color:var(--pink);opacity:1;box-shadow:0 0 0 2px var(--pink), 0 10px 28px rgba(232,74,138,.38)}
+.card.on::before{
+  content:"SELECTED";position:absolute;top:8px;left:8px;z-index:5;
+  font-family:var(--display);font-weight:700;font-size:8px;letter-spacing:.16em;
+  color:#0c1418;background:var(--pink);padding:3px 6px;border-radius:999px;
+}
 .card.applied::after{
   content:'ON STAGE';position:absolute;top:8px;right:8px;
   font-family:var(--display);font-weight:700;font-size:8px;letter-spacing:.16em;
@@ -590,8 +595,25 @@ body.lib-open .stage-art{visibility:hidden;pointer-events:none}
   transition:transform var(--t) var(--eo), opacity var(--t) var(--eo), border-color var(--t) var(--eo);
 }
 .gcard:hover:not(.ws){transform:translateY(-3px);opacity:1;border-color:rgba(247,244,240,.22)}
-.gcard.on{border-color:var(--pink);box-shadow:0 0 0 1px var(--pink)}
-.gcard.ws-have{border-color:rgba(122,215,240,.35)}
+.gcard.on{
+  border-color:var(--pink);
+  box-shadow:0 0 0 2px var(--pink), 0 0 18px rgba(232,74,138,.4);
+  opacity:1;
+}
+.gcard.on::before{
+  content:"SELECTED";position:absolute;top:8px;left:8px;z-index:6;
+  font-family:var(--display);font-weight:700;font-size:8px;letter-spacing:.16em;
+  color:#0c1418;background:var(--pink);padding:3px 6px;border-radius:999px;
+  pointer-events:none;
+}
+.gcard.ws-have:not(.on){border-color:rgba(122,215,240,.35)}
+.gcard.applied{border-color:var(--cyan)}
+.gcard.applied::after{
+  content:attr(data-live);position:absolute;top:8px;right:8px;z-index:6;
+  font-family:var(--display);font-weight:700;font-size:8px;letter-spacing:.16em;
+  color:#0c1418;background:var(--cyan);padding:3px 6px;border-radius:999px;
+  pointer-events:none;white-space:nowrap;
+}
 .gcard .thumb{position:absolute;inset:0;background:#121c22}
 .gcard .thumb img{
   position:absolute;inset:0;width:100%;height:100%;
@@ -1002,6 +1024,35 @@ function filtered(){
   });
 }
 
+// Outputs currently showing the given catalog id, e.g. ["HDMI-A-1"].
+function liveOutputsFor(id){
+  const outs=[];
+  const applied=(state && state.applied) || {};
+  Object.keys(applied).forEach(o=>{
+    if(applied[o]===id) outs.push(shortOut(o));
+  });
+  return outs;
+}
+function liveBadgeFor(id){
+  const outs=liveOutputsFor(id);
+  if(!outs.length) return "";
+  return "ON " + outs.join(" ");
+}
+
+// Refreshes ON badges on existing grid cards without rebuilding them
+// (rebuilding would reload every thumbnail and jump the scroll).
+function markLive(){
+  $$("#libGrid .gcard, #wsGrid .gcard").forEach(c=>{
+    const ds=c.dataset||{};
+    const id=ds.id || (ds.wsid ? "steam:"+ds.wsid : "");
+    if(!id) return;
+    const badge=liveBadgeFor(id);
+    c.classList.toggle("applied", badge!=="");
+    if(badge!=="") c.setAttribute("data-live", badge);
+    else c.removeAttribute("data-live");
+  });
+}
+
 function renderStrip(){
   const list=filtered();
   $("#stripCount").textContent=String(list.length);
@@ -1009,7 +1060,8 @@ function renderStrip(){
   box.innerHTML="";
   list.forEach(it=>{
     const c=document.createElement("button");
-    c.className="card"+(it.id===state.selected?" on":"")+(state.applied[state.out]===it.id?" applied":"");
+    c.className="card"+(sameWallpaper(it.id,state.selected)?" on":"")+(state.applied[state.out]===it.id?" applied":"");
+    c.dataset.id=String(it.id);
     c.innerHTML=`<div class="thumb" style="background:${thumb(it)}"></div><div class="scrim"></div><div class="info"><div class="ttl">${it.title}</div><div class="typ">${it.type}</div></div>`;
     c.onclick=()=>select(it.id);
     c.ondblclick=()=>shine();
@@ -1066,6 +1118,13 @@ function renderProps(){
   const box=$("#propsRows");
   const sub=$("#propsSub");
   const it=catalog.find(x=>x.id===state.selected);
+  // On-demand fetch: catalog rows ship without properties; if the selected
+  // item hasn't loaded them yet (e.g. selected before the bridge wired up),
+  // pull them now and re-render on arrival instead of showing "no controls".
+  if(it && (!it.properties || !Object.keys(it.properties).length) &&
+     typeof window.anisFetchProps==="function"){
+    window.anisFetchProps(it.id);
+  }
   const rows=listedProps(it && it.properties);
   if(btn) btn.classList.toggle("has", rows.length>0);
   if(!box) return;
@@ -1156,6 +1215,20 @@ function renderProps(){
   });
 }
 
+function sameWallpaper(a,b){
+  if(!a||!b) return false;
+  if(a===b) return true;
+  return String(a).replace(/^steam:/,"")===String(b).replace(/^steam:/,"");
+}
+function paintSelected(){
+  const id=state.selected;
+  $$("#filmstrip .card, #libGrid .gcard, #wsGrid .gcard").forEach(c=>{
+    const cid=c.dataset.id||"";
+    const ws=c.dataset.wsid||"";
+    c.classList.toggle("on", sameWallpaper(cid,id) || sameWallpaper(ws,id) || sameWallpaper("steam:"+ws,id));
+  });
+}
+
 function select(id){
   const it=catalog.find(x=>x.id===id); if(!it)return;
   state.selected=id;
@@ -1179,6 +1252,7 @@ function select(id){
     $("#stageWash").style.background=thumb(it);
   }
   renderStrip();
+  paintSelected();
   renderProps();
 }
 
@@ -1350,7 +1424,9 @@ function paintGrid(box, items, kind){
   }
   items.forEach(it=>{
     const c=document.createElement("button");
-    c.className="gcard"+(kind==="ws"?" ws":"")+(it.id===state.selected?" on":"")+(kind==="ws"&&it.installed?" ws-have":"");
+    c.className="gcard"+(kind==="ws"?" ws":"")+(sameWallpaper(it.id,state.selected)?" on":"")+(kind==="ws"&&it.installed?" ws-have":"");
+    const live=liveBadgeFor(kind==="ws" ? "steam:"+it.id : it.id);
+    if(live!==""){ c.classList.add("applied"); c.setAttribute("data-live", live); }
     c.type="button";
     if(kind==="ws") c.dataset.wsid=String(it.id);
     else c.dataset.id=String(it.id);
@@ -1409,6 +1485,11 @@ function paintGrid(box, items, kind){
       if(e.target.closest(".sub-btn")) return;
       const catItem=catalog.find(x=>x.id===it.id || x.id==="steam:"+it.id);
       if(catItem) select(catItem.id);
+    };
+    c.ondblclick=e=>{
+      if(e.target.closest(".sub-btn")) return;
+      const catItem=catalog.find(x=>x.id===it.id || x.id==="steam:"+it.id);
+      if(catItem){ select(catItem.id); shine(); }
     };
     box.appendChild(c);
   });
@@ -1643,7 +1724,7 @@ window.anis = {
   catalog, workshop, state, $, $$,
   renderStrip, select, toast, thumb,
   setOut, setAtmo, setGaming, paintGamingPref, paintGamingActive, setVol, setFps, setMeasuredFps, shortOut,
-  paintBlacklist,
+  paintBlacklist, markLive,
   get selectedId(){ return state.selected; },
 };
 </script>

@@ -54,7 +54,17 @@
     if (typeof A.renderProps === "function") A.renderProps();
     if (!A.catalog.length) return;
     if (!A.catalog.some((x) => x.id === state.selected)) {
-      A.select(A.catalog[0].id);
+      // Prefer the wallpaper that is actually live on the current output so
+      // the UI opens showing what you have instead of the first catalog row.
+      const liveId =
+        state.applied && state.applied[state.out]
+          ? state.applied[state.out]
+          : null;
+      const target =
+        liveId && A.catalog.some((x) => x.id === liveId)
+          ? liveId
+          : A.catalog[0].id;
+      A.select(target);
     } else {
       A.renderStrip();
     }
@@ -120,6 +130,9 @@
       A.setMeasuredFps(parts.join("  ") || "—", rows);
     }
     A.renderStrip();
+    // Refresh ON badges on the catalog/workshop grids in place so the user
+    // sees which wallpaper is live on each output.
+    if (typeof A.markLive === "function") A.markLive();
   }
 
   window.anisOnShine = function (out, id) {
@@ -164,13 +177,27 @@
     const prevSelect = A.select;
     A.select = function (id) {
       if (typeof prevSelect === "function") prevSelect(id);
+      fetchItemProps(id);
+    };
+    // Grid and shortcuts call the bare `select()` binding captured before
+    // this override existed, which bypassed the properties fetch above and
+    // left every clicked card with `properties: {}` ("no extra controls").
+    // Rebind the global so all selection paths go through the wrapper.
+    try { window.select = A.select; } catch (e) {}
+    window.anisFetchProps = fetchItemProps;
+
+    function fetchItemProps(id) {
       if (!client || !id || typeof client.itemProperties !== "function") return;
+      const it = A.catalog.find(function (x) { return x.id === id; });
+      if (!it || it._propsLoading) return;
+      it._propsLoading = true;
       client.itemProperties(id, function (props) {
-        const it = A.catalog.find(function (x) { return x.id === id; });
-        if (it) it.properties = props && typeof props === "object" ? props : {};
+        it._propsLoading = false;
+        const found = A.catalog.find(function (x) { return x.id === id; });
+        if (found) found.properties = props && typeof props === "object" ? props : {};
         if (typeof A.renderProps === "function") A.renderProps();
       });
-    };
+    }
     client.catalogChanged.connect(pullCatalog);
     client.monitorsChanged.connect(function () {
       ingestMonitors(client.monitors);
