@@ -2,6 +2,7 @@
 
 #include "renderer.h"
 
+#include <QElapsedTimer>
 #include <QTimer>
 #include <QVariant>
 
@@ -30,8 +31,13 @@ class WebRenderer final : public Renderer {
   double frameRate() const override;
   void applyPlayback(int fps, double volume) override;
 
+ public slots:
+  void ingestCapturedFrame(const QString &dataUrl);
+
  private:
   void captureFrame();
+  bool tryGrab();
+  void advancePushGrid(qint64 now);
   void onJsCapture(const QVariant &result);
   void acceptFrame(const QImage &image);
   void activateFallback(const QString &reason);
@@ -47,7 +53,10 @@ class WebRenderer final : public Renderer {
   bool paused_ = false;
   bool loaded_ = false;
   bool fallback_ = true;
-  bool captureInFlight_ = false;
+  bool grabWorks_ = false;
+  bool jsInFlight_ = false;
+  QElapsedTimer jsClock_;
+  qint64 lastPushMs_ = 0;
   int frameCount_ = 0;
   qint64 fpsEpochMs_ = 0;
   double fps_ = 0.0;

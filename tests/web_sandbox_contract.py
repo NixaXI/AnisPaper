@@ -19,21 +19,23 @@ require("QWebEngineUrlRequestInterceptor" in WEB,
         "web renderer is missing a URL interceptor")
 require("info.block(true)" in WEB,
         "web interceptor does not block non-local requests")
-require("LocalContentCanAccessRemoteUrls" in WEB and
-        "false" in WEB.split("LocalContentCanAccessRemoteUrls", 1)[1][:120],
-        "web renderer still allows local pages to hit the network")
+require("ResourceTypeMainFrame" in WEB,
+        "web interceptor no longer pins the main document to the local project")
 require("WebGLEnabled, true" in WEB,
         "web renderer disables WebGL")
 require("__anispaperCapture" in WEB,
         "web renderer no longer readbacks wallpaper canvases")
 require("preserveDrawingBuffer" in WEB,
         "WebGL canvases are not preserved for readback")
+require("Math.max(tw / best.width, th / best.height)" in WEB,
+        "web capture no longer cover-crops portrait Spine canvases")
+require("Math.min(960" not in WEB and "Math.min(540" not in WEB,
+        "web capture still downscales the page below native size")
+require("childWidth > 1280" not in ISOLATED and "spec.width > 1280" not in CHILD,
+        "web child is still capped below the physical output")
 require('flags += "--disable-gpu"' not in CHILD and
-        "flags += \"--disable-gpu\"" not in CHILD,
+        "flags += \\\"--disable-gpu\\\"" not in CHILD,
         "renderer child still forces --disable-gpu onto web wallpapers")
 require("WebRTC" in CHILD,
         "web child chromium flags no longer disable WebRTC")
-require('spec_.type == QStringLiteral("web")' in ISOLATED and
-        "1920" in ISOLATED,
-        "web children are no longer capped below 4K capture cost")
-print("web_sandbox_contract: local-only interceptor, WebGL readback, no forced --disable-gpu")
+print("web_sandbox_contract: local-only main frame, cover capture, native size, no forced --disable-gpu")

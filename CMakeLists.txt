@@ -129,6 +129,7 @@ target_link_libraries(anis-paperd PRIVATE
     Qt6::Widgets
     Qt6::WebEngineCore
     Qt6::WebEngineWidgets
+    Qt6::WebChannel
     anispaper-bridge
     PkgConfig::WAYLAND_CLIENT
     PkgConfig::MPV

@@ -12,6 +12,7 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QPainter>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
 #include <QSaveFile>
@@ -192,14 +193,8 @@ bool IsolatedRenderer::start(QString *error) {
   fatalReported_ = false;
   childFailure_.clear();
   input_.clear();
-  int childWidth = spec_.width;
-  int childHeight = spec_.height;
-  if (spec_.type == QStringLiteral("web") &&
-      (childWidth > 1920 || childHeight > 1080)) {
-    const double scale = qMin(1920.0 / childWidth, 1080.0 / childHeight);
-    childWidth = qBound(64, qRound(childWidth * scale), 1920);
-    childHeight = qBound(64, qRound(childHeight * scale), 1080);
-  }
+  const int childWidth = spec_.width;
+  const int childHeight = spec_.height;
   QString program = QCoreApplication::applicationFilePath();
   QStringList args{QStringLiteral("--renderer-child"), QStringLiteral("--type"),
                    spec_.type, QStringLiteral("--file"), spec_.file,
@@ -495,14 +490,10 @@ void IsolatedRenderer::parseLine(const QByteArray &line) {
   const QString jpegPayload = message.value(QStringLiteral("jpeg")).toString();
   bool directPublished = false;
   if (jpegPayload.isEmpty()) {
-    // Native Scene/video frames go straight from the validated child slot to
-    // the output-specific bridge.  Web children often render below the
-    // physical wl_output size, so they always copy+scale onto spec_.
+    // Native Scene/video/web frames go straight from the validated child slot
+    // to the output-specific bridge when the slot already matches spec_.
     if (profilePicture) stageTimer.restart();
-    const bool webScaled = spec_.type == QStringLiteral("web");
-    const SceneTransportPublishResult direct =
-        webScaled ? SceneTransportPublishResult::Ineligible
-                  : publishSceneTransportFrame();
+    const SceneTransportPublishResult direct = publishSceneTransportFrame();
     if (direct == SceneTransportPublishResult::Published) {
       // No private frame_ memcpy in the eligible direct path.
       directPublished = true;
@@ -514,10 +505,16 @@ void IsolatedRenderer::parseLine(const QByteArray &line) {
     if (!directPublished &&
         (frame_.width() != spec_.width || frame_.height() != spec_.height) &&
         spec_.width >= 64 && spec_.height >= 64) {
-      frame_ = frame_
-                   .scaled(spec_.width, spec_.height, Qt::IgnoreAspectRatio,
-                           Qt::FastTransformation)
-                   .convertToFormat(QImage::Format_RGBA8888);
+      const QImage scaled = frame_.scaled(QSize(spec_.width, spec_.height),
+                                          Qt::KeepAspectRatioByExpanding,
+                                          Qt::SmoothTransformation);
+      QImage fitted(spec_.width, spec_.height, QImage::Format_RGBA8888);
+      fitted.fill(Qt::black);
+      QPainter painter(&fitted);
+      painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+      painter.drawImage((spec_.width - scaled.width()) / 2,
+                        (spec_.height - scaled.height()) / 2, scaled);
+      frame_ = fitted;
     }
     if (profilePicture) {
       g_parentProfiler.sample(g_parentProfiler.shmCopyMs, stageTimer);

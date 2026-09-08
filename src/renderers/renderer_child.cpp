@@ -206,9 +206,14 @@ class ChildProtocol final : public QObject {
     // notification.  At 4K this replaces a JPEG encode, a base64 inflate and a
     // parent-side decode per frame.
     if (transport_.isActive() && transport_.publish(image)) {
+      // Keep announcedSeq_ in sync: without this, the NEXT frameReady takes
+      // the direct-announce branch above for the frame announced here and the
+      // parent/plasma observes every frame twice (measured as strict seq
+      // pairs N,N on web wallpapers).
+      announcedSeq_ = transport_.frameNo();
       publish({{QStringLiteral("event"), QStringLiteral("frame")},
                {QStringLiteral("shm"), true},
-               {QStringLiteral("seq"), static_cast<qint64>(transport_.frameNo())},
+               {QStringLiteral("seq"), static_cast<qint64>(announcedSeq_)},
                {QStringLiteral("width"), image.width()},
                {QStringLiteral("height"), image.height()},
                {QStringLiteral("fallback"), renderer_->isFallback()}});
@@ -281,14 +286,59 @@ int runRendererChild(int argc, char **argv) {
     }
   }
   if (type == QStringLiteral("web")) {
+    qputenv("QT_ENABLE_HIGHDPI_SCALING", "0");
+    qputenv("QT_AUTO_SCREEN_SCALE_FACTOR", "0");
+    qputenv("QT_SCALE_FACTOR", "1");
+    // Run the web child on XWayland (QT_QPA_PLATFORM=xcb) when an X display
+    // is available.  Measured on AMD RX 6600 @1080p, web Nikke Spine:
+    //   wayland QPA: compositor DSF 2 (3840x2160 grab + 19 ms downscale),
+    //     page rAF ~18 Hz, output ~18 fps, grab ~30 ms
+    //   xcb QPA:     native 1080p grab, page rAF 60 Hz, output ~32 fps,
+    //     grab ~6 ms, real GL 4.6 context.
+    // Scoped to web only: the video child needs the Wayland QPA for the
+    // mpv VAAPI zero-copy path (MPV_RENDER_PARAM_WL_DISPLAY).  Gated on
+    // DISPLAY so X-less sessions keep the Wayland path; ANISPAPER_WEB_QPA
+    // overrides for tests ("wayland"/"xcb").
+    const QByteArray qpaOverride =
+        qgetenv("ANISPAPER_WEB_QPA").trimmed().toLower();
+    if (qpaOverride == "xcb" ||
+        (qpaOverride != "wayland" &&
+         !qEnvironmentVariableIsEmpty("DISPLAY"))) {
+      qputenv("QT_QPA_PLATFORM", "xcb");
+    }
     QByteArray flags = qgetenv("QTWEBENGINE_CHROMIUM_FLAGS");
     const QByteArray extra =
-        QByteArrayLiteral("--disable-background-networking --disable-sync "
+        QByteArrayLiteral(" --disable-background-networking --disable-sync "
                           "--disable-extensions --disable-component-update "
                           "--disable-breakpad --disable-speech-api --no-first-run "
                           "--autoplay-policy=no-user-gesture-required "
-                          "--disable-features=WebRTC,WebUSB,WebBluetooth,"
-                          "LiveCaption,Translation");
+                          "--disable-backgrounding-occluded-windows "
+                          "--disable-renderer-backgrounding "
+                           "--disable-background-timer-throttling "
+                           "--disable-gpu-vsync "
+                           // NOTE: no --disable-frame-rate-limit here.  It
+                           // uncaps rAF/compositor for the hidden page
+                           // (measured 3000+ fps of full-scene SwiftShader
+                           // renders), starving captures and making boot
+                           // chaotic.  Without it Chromium paces hidden
+                           // pages at ~60 Hz, which is all we publish.
+                           "--force-device-scale-factor=1 "
+                           // Spine wallpapers boot via fetch() of .config.json
+                           // / .skel / .atlas over file://.  Chromium blocks
+                           // file:-to-file: fetch without this switch, so the
+                           // player dies silently on its loading screen.  The
+                           // SandboxInterceptor still pins every file: URL to
+                           // the wallpaper dir, so this cannot read outside.
+                           "--allow-file-access-from-files "
+                           // Newer Chromium gates software-WebGL behind this
+                           // flag.  Without it, hidden/offscreen views log
+                           // "WebGL unsupported" and Spine canvases stay
+                           // black; with it the GPU path is still preferred
+                           // and SwiftShader is only the fallback.
+                           "--enable-unsafe-swiftshader "
+                           "--disable-features=WebRTC,WebUSB,WebBluetooth,"
+                          "LiveCaption,Translation,CalculateNativeWinOcclusion,"
+                          "IntensiveWakeUpThrottling");
     if (!flags.isEmpty()) flags += ' ';
     flags += extra;
     // Tests may set --disable-gpu; do not force it.  WebGL wallpapers need a
@@ -377,13 +427,6 @@ int runRendererChild(int argc, char **argv) {
       spec.height = physical.height();
     }
   }
-  if (spec.type == QStringLiteral("web") &&
-      (spec.width > 1920 || spec.height > 1080)) {
-    const double scale = qMin(1920.0 / spec.width, 1080.0 / spec.height);
-    spec.width = qBound(64, qRound(spec.width * scale), 1920);
-    spec.height = qBound(64, qRound(spec.height * scale), 1080);
-  }
-
   if (qEnvironmentVariable("ANISPAPER_TEST_CRASH_ON_START") == QStringLiteral("1")) {
     QTimer::singleShot(0, [] { ::kill(::getpid(), SIGKILL); });
   }
