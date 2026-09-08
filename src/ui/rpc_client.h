@@ -43,6 +43,7 @@ class RpcClient : public QObject {
   Q_PROPERTY(QVariantList liveRenderers READ liveRenderers NOTIFY liveRenderersChanged)
   Q_PROPERTY(bool gamingActive READ gamingActive NOTIFY gamingActiveChanged)
   Q_PROPERTY(QString gamingMode READ gamingMode NOTIFY gamingModeChanged)
+  Q_PROPERTY(QStringList gamingBlacklist READ gamingBlacklist NOTIFY gamingBlacklistChanged)
   Q_PROPERTY(bool workshopBusy READ workshopBusy NOTIFY workshopBusyChanged)
   Q_PROPERTY(QString workshopError READ workshopError NOTIFY workshopErrorChanged)
   Q_PROPERTY(QVariantList workshopItems READ workshopItems NOTIFY workshopItemsChanged)
@@ -78,6 +79,7 @@ class RpcClient : public QObject {
   QVariantList liveRenderers() const { return liveRenderers_; }
   bool gamingActive() const { return gamingActive_; }
   QString gamingMode() const { return gamingMode_; }
+  QStringList gamingBlacklist() const { return gamingBlacklist_; }
   bool workshopBusy() const { return workshopBusy_; }
   QString workshopError() const { return workshopError_; }
   QVariantList workshopItems() const { return workshopItems_; }
@@ -109,6 +111,7 @@ class RpcClient : public QObject {
   Q_INVOKABLE void applyWallpaper(const QString &id, const QString &output);
   Q_INVOKABLE void stopWallpaper(const QString &output);
   Q_INVOKABLE void setGamingMode(const QString &mode);
+  Q_INVOKABLE void setGamingBlacklist(const QStringList &patterns);
   Q_INVOKABLE void setWallpaperProperties(const QString &id, const QVariantMap &values);
   Q_INVOKABLE void setWallpaperProperty(const QString &id, const QString &key,
                                         const QVariant &value);
@@ -137,6 +140,7 @@ class RpcClient : public QObject {
   void liveRenderersChanged();
   void gamingActiveChanged();
   void gamingModeChanged();
+  void gamingBlacklistChanged();
   void catalogChanged();
   void workshopBusyChanged();
   void workshopErrorChanged();
@@ -207,6 +211,7 @@ class RpcClient : public QObject {
   QVariantList liveRenderers_;
   bool gamingActive_ = false;
   QString gamingMode_ = QStringLiteral("auto");
+  QStringList gamingBlacklist_;
   QNetworkAccessManager http_;
   bool workshopBusy_ = false;
   QString workshopError_;

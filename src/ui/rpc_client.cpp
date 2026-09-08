@@ -771,6 +771,25 @@ void RpcClient::setGamingMode(const QString &mode) {
   });
 }
 
+void RpcClient::setGamingBlacklist(const QStringList &patterns) {
+  QStringList normalized;
+  for (const QString &raw : patterns) {
+    const QString pattern = raw.trimmed().toLower();
+    if (pattern.size() < 2 || pattern.size() > 128) continue;
+    if (!normalized.contains(pattern)) normalized << pattern;
+    if (normalized.size() >= 64) break;
+  }
+  if (gamingBlacklist_ != normalized) {
+    gamingBlacklist_ = normalized;
+    emit gamingBlacklistChanged();
+  }
+  QJsonArray payload;
+  for (const QString &pattern : normalized) payload << pattern;
+  send("settings.set", {{"gamingBlacklist", payload}}, [this](const QJsonValue &, const QString &error) {
+    if (!error.isEmpty()) setToast(error);
+  });
+}
+
 void RpcClient::setWallpaperProperties(const QString &id, const QVariantMap &values) {
   if (id.trimmed().isEmpty() || values.isEmpty()) return;
   send("wallpaper.setProperties",
@@ -1956,6 +1975,18 @@ void RpcClient::bootstrap() {
     if (!mode.isEmpty() && gamingMode_ != mode) {
       gamingMode_ = mode;
       emit gamingModeChanged();
+    }
+    QStringList blacklist;
+    for (const auto &value : object.value("gamingBlacklist").toArray()) {
+      const QString pattern = value.toString().trimmed().toLower();
+      if (pattern.size() >= 2 && pattern.size() <= 128 && !blacklist.contains(pattern)) {
+        blacklist << pattern;
+      }
+      if (blacklist.size() >= 64) break;
+    }
+    if (gamingBlacklist_ != blacklist) {
+      gamingBlacklist_ = blacklist;
+      emit gamingBlacklistChanged();
     }
   });
   send("status.get", {}, [this](const QJsonValue &result, const QString &) {

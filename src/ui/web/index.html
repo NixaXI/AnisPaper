@@ -409,6 +409,16 @@ img{display:block;max-width:100%}
 .tog:last-child{border-bottom:0}
 .tog .lb{font-family:var(--display);font-weight:700;font-size:13px;letter-spacing:.04em}
 .tog .ds{font-size:11px;color:var(--cream-faint);margin-top:3px}
+.tog-col{padding:14px 0;border-bottom:1px solid var(--line)}
+.tog-col:last-child{border-bottom:0}
+.tog-col .lb{font-family:var(--display);font-weight:700;font-size:13px;letter-spacing:.04em}
+.tog-col .ds{font-size:11px;color:var(--cream-faint);margin-top:3px}
+.txt{
+  width:100%;margin-top:8px;padding:9px 12px;border-radius:10px;
+  border:1px solid var(--line);background:rgba(247,244,240,.06);
+  color:var(--cream);font-size:13px;font-family:inherit;
+}
+.txt:focus{outline:none;border-color:var(--cyan)}
 .knob{
   width:40px;height:22px;border-radius:999px;background:rgba(247,244,240,.12);position:relative;
   transition:background var(--t) var(--eo);
@@ -815,6 +825,10 @@ body.lib-open .stage-art{visibility:hidden;pointer-events:none}
       <div><div class="lb">Curtain on idle</div><div class="ds">Drop veil after 20 minutes</div></div>
       <button class="knob" id="knobIdle"><i></i></button>
     </div>
+    <div class="tog-col">
+      <div><div class="lb">Game blacklist</div><div class="ds">Comma-separated process names that force Gaming Mode (e.g. sober). Matches process command lines, case-insensitive.</div></div>
+      <input class="txt" id="gamingBlacklist" type="text" placeholder="sober, ..." autocomplete="off" spellcheck="false" />
+    </div>
   </div>
 </aside>
 
@@ -1220,6 +1234,21 @@ function setGaming(on){
   paintGamingPref(on);
   if(window.anisOnGaming) window.anisOnGaming(on);
 }
+let blacklistTimer=null;
+function paintBlacklist(list){
+  const input=$("#gamingBlacklist");
+  if(!input) return;
+  // Don't clobber while the user is typing; the debounced save below owns it.
+  if(document.activeElement===input) return;
+  const arr=Array.isArray(list)?list:[];
+  input.value=arr.join(", ");
+}
+function saveBlacklist(){
+  const input=$("#gamingBlacklist");
+  if(!input) return;
+  const list=String(input.value||"").split(",").map(s=>s.trim()).filter(s=>s.length>0);
+  if(window.anisOnBlacklist) window.anisOnBlacklist(list);
+}
 
 function closeSheets(){
   $("#liveSheet").classList.remove("open");
@@ -1535,6 +1564,17 @@ $("#props").onclick=()=>{
   }
 };
 $("#knobIdle").onclick=function(){this.classList.toggle("on")};
+const blacklistInput=$("#gamingBlacklist");
+if(blacklistInput){
+  blacklistInput.addEventListener("input",()=>{
+    clearTimeout(blacklistTimer);
+    blacklistTimer=setTimeout(saveBlacklist, 400);
+  });
+  blacklistInput.addEventListener("change",()=>{
+    clearTimeout(blacklistTimer);
+    saveBlacklist();
+  });
+}
 function setVol(v){
   state.vol=+v;
   $("#vol").textContent=state.vol;
@@ -1603,7 +1643,7 @@ window.anis = {
   catalog, workshop, state, $, $$,
   renderStrip, select, toast, thumb,
   setOut, setAtmo, setGaming, paintGamingPref, paintGamingActive, setVol, setFps, setMeasuredFps, shortOut,
-  renderWorkshop, renderLibrary, openSearch, closeSearch, paintGrid, ratingsCsv, renderProps,
+  paintBlacklist,
   get selectedId(){ return state.selected; },
 };
 </script>

@@ -139,6 +139,9 @@
     // (daemon auto).  Off must be a hard off — never auto-detect Steam.
     if (client) client.setGamingMode(on ? "auto" : "off");
   };
+  window.anisOnBlacklist = function (list) {
+    if (client) client.setGamingBlacklist(Array.isArray(list) ? list : []);
+  };
   window.anisOnProp = function (id, values) {
     if (client) client.setWallpaperProperties(id, values);
   };
@@ -196,6 +199,9 @@
     if (typeof A.paintGamingPref === "function") {
       A.paintGamingPref((client.gamingMode || "auto") !== "off");
     }
+    if (typeof A.paintBlacklist === "function") {
+      A.paintBlacklist(client.gamingBlacklist || []);
+    }
     if (typeof A.paintGamingActive === "function") {
       A.paintGamingActive(!!client.gamingActive);
     }
@@ -204,6 +210,13 @@
         A.paintGamingPref((client.gamingMode || "auto") !== "off");
       }
     });
+    if (client.gamingBlacklistChanged && client.gamingBlacklistChanged.connect) {
+      client.gamingBlacklistChanged.connect(function () {
+        if (typeof A.paintBlacklist === "function") {
+          A.paintBlacklist(client.gamingBlacklist || []);
+        }
+      });
+    }
 
     function workshopOwned(id, item) {
       const sid = String(id || "");
