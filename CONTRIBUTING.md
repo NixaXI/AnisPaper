@@ -57,6 +57,6 @@ Does the renderer stay alive?:
 
 ## Licensing
 
-By submitting a contribution, you confirm you have the right to submit it under the repository license.
+By submitting a contribution, you confirm you have the right to submit it under the repository license (GPL-3.0-or-later, see LICENSE).
 
 Do not paste third-party code of unknown origin into a PR.

@@ -198,7 +198,9 @@ systemctl --user daemon-reload
 
 ## License / third-party
 
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The Scene path vendors/customizes [Almamu/linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine) — keep those licenses intact.
+AnisPaper is licensed under the **GNU General Public License v3.0 or later** — see [LICENSE](LICENSE).
+
+This is required because the Scene path statically links [Almamu/linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine) (GPL-3.0-or-later) into `anis-paper-scene-engine` (`-Wl,--whole-archive wallpaperengine-core`). That makes the combined work a GPL-3.0-or-later derivative when distributed. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The Scene path vendors/customizes that upstream — keep those licenses intact.
 
 Wallpaper Engine / Steam Workshop assets stay under their own terms and are **not** redistributed here. AnisPaper is independent and not affiliated with Valve, Steam, Wallpaper Engine, or KDE.
 
