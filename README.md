@@ -2,22 +2,16 @@
 
 <img src="assets/banner-anispaper.svg" alt="AnisPaper banner" width="100%" />
 
-<br>
-
-<img src="assets/anis-star.png" alt="Anis Star" width="280" />
-
 # AnisPaper
 
-**Live wallpapers for KDE Plasma 6** — without stuffing the heavy renderer inside `plasmashell`.
+**Live wallpapers for KDE Plasma 6** — the heavy renderer runs outside `plasmashell`,
+so a broken wallpaper doesn't take the desktop down with it.
 
-[![Platform](https://img.shields.io/badge/Platform-Linux-111111?style=for-the-badge&logo=linux&logoColor=FFD54A)](#)
-[![Desktop](https://img.shields.io/badge/Desktop-KDE%20Plasma%206-1D99F3?style=for-the-badge&logo=kde&logoColor=white)](#)
-[![Session](https://img.shields.io/badge/Session-Wayland-222222?style=for-the-badge)](#)
-[![Scene](https://img.shields.io/badge/Scene-Working-FFD54A?style=for-the-badge)](#)
-[![Video](https://img.shields.io/badge/Video-Working-FFD54A?style=for-the-badge)](#)
-[![Web](https://img.shields.io/badge/Web-Working-FFD54A?style=for-the-badge)](#)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Plasma 6](https://img.shields.io/badge/Plasma-6-1D99F3.svg)](#)
+[![Wayland](https://img.shields.io/badge/Wayland-supported-222222.svg)](#)
 
-[Website](https://nixaxi.github.io/AnisPaper/) · [Releases](https://github.com/NixaXI/AnisPaper/releases) · [Issues](https://github.com/NixaXI/AnisPaper/issues)
+[Releases](https://github.com/NixaXI/AnisPaper/releases) · [Issues](https://github.com/NixaXI/AnisPaper/issues) · [Known issues](docs/known-issues.md)
 
 </div>
 
@@ -73,11 +67,39 @@ AnisPaper Frame → KDE Plasma
 | Steam library discovery | Working |
 | Wallpaper Engine **Scene** | Working (experimental) |
 | **Video** (mpv, isolated) | Working |
-| **Web** on the desktop | Working |
+| **Web** on the desktop | Broken — catalog-only, see [known issues](docs/known-issues.md) |
 | Packaged installer / AppImage | In progress |
 | Gaming Mode | Rough — see [open issues](https://github.com/NixaXI/AnisPaper/issues) |
 
 AnisPaper does **not** ship Steam Workshop content or Wallpaper Engine proprietary assets. You need your own Steam + Wallpaper Engine install for Scene Workshop items.
+
+---
+
+## Tested on
+
+Developer machine: CachyOS, Plasma 6 / Wayland, Ryzen 7 5700G, RX 6600, 32 GB RAM,
+two monitors (DP + HDMI, 1080p).
+
+- Scene wallpaper: ~58 FPS at 1080p (depends on the scene), daemon + renderer
+  around ~4% CPU and ≤800 MB RAM in light use.
+- Video wallpaper: follows the source frame rate (e.g. 30 FPS source → ~30 FPS).
+- Full-workshop sweep (312 local Scene items): 306 animated, 6 static fallbacks,
+  0 crashes — see [known issues](docs/known-issues.md).
+- Not stress-tested: 10–20 Plasma Activities at once, NVIDIA / Intel GPUs,
+  4K outputs. Reports welcome.
+
+---
+
+## Limitations (honest list)
+
+- **One wallpaper per output, shared across Activities.** If Activity A and B both
+  use AnisPaper Frame on the same screen, they show the same stream. Per-Activity
+  wallpapers + pausing invisible ones is future work (see issue #4).
+- **Web wallpapers don't work on the desktop.** They stay in the catalog as
+  experimental; Scene and Video are the supported types.
+- **Gaming Mode is rough.** It pauses renderers to save GPU, but edge cases remain.
+- **Experimental overall.** Expect sharp edges; file bugs with distro, Plasma
+  version, GPU/driver, outputs, wallpaper type/ID, and journal lines.
 
 ---
 
@@ -173,7 +195,7 @@ When filing a bug, include distro, Plasma version, Wayland/X11, GPU/driver, outp
 
 Bugs, patches, packaging help, and Plasma-edge cases are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Prefer small, reviewable PRs. AI-assisted patches are fine if you say so and still own the diff (test it, no secrets, no blind dumps).
+Prefer small, reviewable PRs you tested on real hardware (no blind dumps, no secrets). This project iterates with AI assistance under human review — every change is owned, reviewed, and hardware-tested.
 
 Help wanted especially around: more GPUs, Scene compatibility reports, packaging, and Gaming Mode edge cases.
 
@@ -208,8 +230,6 @@ Wallpaper Engine / Steam Workshop assets stay under their own terms and are **no
 
 <div align="center">
 
-**Make the desktop move. Keep Plasma alive.**
-
-[Website](https://nixaxi.github.io/AnisPaper/) · [Releases](https://github.com/NixaXI/AnisPaper/releases) · [Issues](https://github.com/NixaXI/AnisPaper/issues)
+[Releases](https://github.com/NixaXI/AnisPaper/releases) · [Issues](https://github.com/NixaXI/AnisPaper/issues) · [Known issues](docs/known-issues.md)
 
 </div>

@@ -12,22 +12,22 @@ Forks, issues and pull requests are welcome.
 6. Test on a real Plasma output when touching rendering, SHM, QML or monitor mapping.
 7. Explain what changed and how you verified it.
 
-## AI-assisted contributions
+## Ownership
 
-AI-assisted development is allowed.
+This project is built with AI assistance under human review — 40+ commits of
+iteration, every change reviewed and tested on real Plasma hardware with
+contract/integration tests passing.
 
-The contributor is still responsible for:
+You need to be able to explain and maintain the code you submit.
+
+The contributor is responsible for:
 
 - understanding the submitted code,
 - reviewing the diff,
-- testing it,
+- testing it on real hardware,
 - ensuring no secrets/private data are included,
-- checking license compatibility,
+- checking license compatibility (GPL-3.0-or-later),
 - avoiding copied code they do not have the right to submit.
-
-You do not need to apologize for using AI.
-
-You do need to be able to explain and maintain the code you submit.
 
 ## Coding expectations
 

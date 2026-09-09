@@ -1,17 +1,30 @@
-## OBLIGATORIO — web wallpapers NO son un wallpaper usable
+# Known issues (user-facing)
 
-- **Estado**: ❌ no funciona como wallpaper. No seguir “arreglando” esta ruta.
-- **Qué sí se ve bien**: el HTML en una pestaña / preview de browser (compositor
-  en vivo, 60 fps).
-- **Qué falla**: AnisPaper Frame en un output real (p. ej. HDMI-A-1). QtWebEngine
-  no entrega un framebuffer usable al ritmo del escritorio. `QWidget::grab()` en
-  Wayland con la vista oculta pinta mal o a ~10–15 fps; el JPEG/canvas JS pierde
-  el fondo CSS, letterboxea Spine y no llega a 30 fps a 1080p. La pestaña y el
-  Frame nunca van a coincidir con este diseño (screenshot → SHM → Plasma).
-- **Tipos soportados de verdad**: `scene` y `video`. Web queda en el catálogo
-  como experimental/roto; no es un objetivo de calidad.
-- **Fix futuro (no ahora)**: surface live (layer-shell / ventana del compositor),
-  no más readback JPEG ni `grab()` a SHM.
+Updated for v0.2.0. This is the honest list — check here before filing a bug.
+
+- **Web wallpapers don't work on the desktop.** They render in a browser
+  preview but not at desktop frame rate via the Frame plugin
+  (`QWidget::grab()` on hidden Wayland views lands at ~10–15 fps or paints
+  wrong; JS/Canvas readback loses CSS backgrounds and letterboxes). They stay
+  in the catalog as experimental. **Supported types: Scene and Video.**
+  A live-surface design (no screenshot readback) is the future fix, not
+  scheduled.
+- **One wallpaper per output, shared across Activities.** Two Activities using
+  AnisPaper Frame on the same screen show the same stream. Per-Activity
+  wallpapers + pausing invisible outputs is tracked as issue #4.
+- **Gaming Mode is rough.** It pauses both renderers and keeps the last frame,
+  but fullscreen edge cases remain. See open issues.
+- **Video memory growth (open).** Long video sessions grow ~tens of MiB/h in
+  the isolated child (points at libmpv/OpenGL retention, not the SHM bridge).
+  No periodic-restart workaround: it would flicker. Details in the dev notes
+  below (P1).
+- **Some Workshop items fall back to static.** A full sweep of 312 local Scene
+  items gave 306 animated, 6 static fallbacks (missing/empty `scene.json`),
+  0 crashes. Re-download those items for animation (F9 below).
+
+---
+
+## Dev notes (chronological, Spanish/English mixed)
 
 ## F4 — 2026-08-09 (resuelto en F8)
 
