@@ -60,8 +60,9 @@ class RpcClient : public QObject {
   Q_PROPERTY(QString steamAuthQrLink READ steamAuthQrLink NOTIFY steamAuthNeededChanged)
   Q_PROPERTY(bool steamUseClient READ steamUseClient NOTIFY steamAuthNeededChanged)
 
- public:
-  explicit RpcClient(QObject *parent = nullptr);
+  public:
+   explicit RpcClient(QObject *parent = nullptr);
+   ~RpcClient() override;
 
   bool online() const { return online_; }
   bool applying() const { return applying_; }

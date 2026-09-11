@@ -558,6 +558,34 @@ void ensureWallpaperEngineVisibleToSteam() {
 QString extractQrAscii(const QString &output);
 QString writeQrPng(const QString &ascii, QString *steamLink);
 
+RpcClient::~RpcClient() {
+  // Orderly shutdown while every member is still alive.  Without this, an
+  // in-flight QNetworkReply/QLocalSocket finished-signal fires
+  // mid-destruction and its lambda touches already-destroyed members
+  // ("corrupted double-linked list" abort on exit).
+  reconnect_.stop();
+  settingsDebounce_.stop();
+  statusPoll_.stop();
+  downloadPoll_.stop();
+  catalog_.disconnect(this);
+  socket_.disconnect(this);
+  socket_.abort();
+  socket_.close();
+  pending_.clear();
+  workshopInstallBusy_ = false;
+  downloadId_.clear();
+  if (workshopBrowseReply_) {
+    workshopBrowseReply_->disconnect(this);
+    workshopBrowseReply_->abort();
+  }
+  if (workshopDetailsReply_) {
+    workshopDetailsReply_->disconnect(this);
+    workshopDetailsReply_->abort();
+  }
+  stopQrProcess();
+  stopUgcProcess();
+}
+
 RpcClient::RpcClient(QObject *parent) : QObject(parent) {
   reconnect_.setInterval(1500);
   reconnect_.setSingleShot(false);
