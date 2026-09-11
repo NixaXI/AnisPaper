@@ -277,6 +277,14 @@ img{display:block;max-width:100%}
 }
 .nav button:hover{color:var(--cream)}
 .nav button.on{color:var(--cream);background:var(--pink-dim)}
+.refresh{
+  height:32px;min-width:32px;padding:0 9px;border-radius:8px;margin-left:6px;
+  font-size:15px;line-height:1;color:var(--cream-dim);
+  transition:color var(--t) var(--eo), transform var(--t) var(--eo);
+}
+.refresh:hover{color:var(--cream)}
+.refresh.spin{animation:spin .7s var(--eo)}
+@keyframes spin{to{transform:rotate(360deg)}}
 
 .now{display:flex;flex-direction:column;gap:2px;min-width:0;max-width:240px}
 .now .k{
@@ -768,6 +776,7 @@ body.lib-open .stage-art{visibility:hidden;pointer-events:none}
     <button data-type="web">WEB</button>
     <button data-type="image">IMAGE</button>
   </div>
+  <button class="refresh" id="refreshBtn" title="Refresh the catalog">↻</button>
 </header>
 
 <div class="strip-wrap" id="stripWrap">
@@ -1563,6 +1572,12 @@ $("#q").oninput=e=>{
   renderStrip();
   openSearch();
   renderLibrary();
+};
+$("#refreshBtn").onclick=e=>{
+  const b=e.currentTarget;
+  b.classList.remove("spin"); void b.offsetWidth; b.classList.add("spin");
+  toast("ENCORE","Refreshing catalog…","↻");
+  if(window.rpc) window.rpc.refreshCatalog();
 };
 $("#q").onfocus=()=>openSearch();
 $(".search").onclick=()=>{$("#q").focus();openSearch()};
