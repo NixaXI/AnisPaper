@@ -63,6 +63,7 @@ AnisPaper Frame → KDE Plasma
 | Feature | Status |
 | --- | --- |
 | KDE Plasma 6 / Wayland | Working |
+| KDE Plasma 6 / X11 | Experimental (output mapping and daemon startup implemented; verify rendering on your setup) |
 | Multi-monitor | Working |
 | Steam library discovery | Working |
 | Wallpaper Engine **Scene** | Working (experimental) |
