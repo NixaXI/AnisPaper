@@ -19,13 +19,21 @@ namespace {
 constexpr int kPlasmaCallTimeoutMs = 5000;
 constexpr auto kPlasmaPlugin = "org.anispaper.frame";
 
-QProcessEnvironment waylandHelperEnvironment() {
+QProcessEnvironment sessionHelperEnvironment() {
   QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
-  // The user systemd manager may not import the graphical session variables.
-  // This helper uses QGuiApplication and the raw Wayland registry, so do not
-  // let an inherited DISPLAY make Qt select the XCB backend at boot.
-  environment.insert(QStringLiteral("QT_QPA_PLATFORM"), QStringLiteral("wayland"));
-  if (environment.value(QStringLiteral("WAYLAND_DISPLAY")).isEmpty()) {
+  // Match the real desktop session, not a leftover Wayland socket/display.
+  const QString session = qEnvironmentVariable("ANISPAPER_SESSION_TYPE",
+                                                qEnvironmentVariable("XDG_SESSION_TYPE")).toLower();
+  const bool x11 = session == QStringLiteral("x11") ||
+                   (session.isEmpty() && !environment.value(QStringLiteral("DISPLAY")).isEmpty() &&
+                    environment.value(QStringLiteral("WAYLAND_DISPLAY")).isEmpty());
+  if (x11) {
+    environment.insert(QStringLiteral("QT_QPA_PLATFORM"), QStringLiteral("xcb"));
+    environment.remove(QStringLiteral("WAYLAND_DISPLAY"));
+  } else {
+    environment.insert(QStringLiteral("QT_QPA_PLATFORM"), QStringLiteral("wayland"));
+  }
+  if (!x11 && environment.value(QStringLiteral("WAYLAND_DISPLAY")).isEmpty()) {
     const QString runtime = environment.value(QStringLiteral("XDG_RUNTIME_DIR"));
     if (!runtime.isEmpty()) {
       const QDir runtimeDirectory(runtime);
@@ -108,7 +116,7 @@ class HelperRunner final : public PlasmaOutputMapRunner {
                            QStringLiteral("/anispaper-plasma-output-map");
     QProcess process;
     process.setProgram(helper);
-    const QProcessEnvironment environment = waylandHelperEnvironment();
+    const QProcessEnvironment environment = sessionHelperEnvironment();
     process.setProcessEnvironment(environment);
     process.setProcessChannelMode(QProcess::SeparateChannels);
     process.start();
@@ -322,11 +330,11 @@ QString PlasmaWallpaperActivator::connectedOutputIdentity(
   return {};
 }
 
-bool PlasmaWallpaperActivator::mappingsMatchWaylandOutputs(
-    const QVector<PlasmaScreenMapping> &mappings, const QJsonArray &waylandOutputs,
+bool PlasmaWallpaperActivator::mappingsMatchOutputs(
+    const QVector<PlasmaScreenMapping> &mappings, const QJsonArray &outputs,
     QString *error) {
-  if (mappings.isEmpty() || waylandOutputs.isEmpty()) {
-    if (error) *error = QStringLiteral("Plasma and Wayland connector mapping is unavailable");
+  if (mappings.isEmpty() || outputs.isEmpty()) {
+    if (error) *error = QStringLiteral("Plasma and session output mapping is unavailable");
     return false;
   }
   QSet<QString> plasmaConnectors;
@@ -340,22 +348,22 @@ bool PlasmaWallpaperActivator::mappingsMatchWaylandOutputs(
     plasmaConnectors.insert(mapping.connector);
     plasmaScreens.insert(mapping.screenNumber);
   }
-  QSet<QString> waylandConnectors;
-  for (const QJsonValue &value : waylandOutputs) {
+  QSet<QString> sessionConnectors;
+  for (const QJsonValue &value : outputs) {
     if (!value.isObject()) {
-      if (error) *error = QStringLiteral("Wayland output inventory is invalid");
+      if (error) *error = QStringLiteral("session output inventory is invalid");
       return false;
     }
     const QString connector = value.toObject().value(QStringLiteral("name")).toString();
-    if (!isCanonicalOutputRequest(connector) || waylandConnectors.contains(connector)) {
-      if (error) *error = QStringLiteral("Wayland output inventory is ambiguous or invalid");
+    if (!isCanonicalOutputRequest(connector) || sessionConnectors.contains(connector)) {
+      if (error) *error = QStringLiteral("session output inventory is ambiguous or invalid");
       return false;
     }
-    waylandConnectors.insert(connector);
+    sessionConnectors.insert(connector);
   }
-  if (plasmaConnectors != waylandConnectors) {
+  if (plasmaConnectors != sessionConnectors) {
     if (error) {
-      *error = QStringLiteral("Plasma helper connectors do not exactly match daemon Wayland outputs");
+      *error = QStringLiteral("Plasma helper connectors do not exactly match session outputs");
     }
     return false;
   }

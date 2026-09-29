@@ -185,11 +185,11 @@ int main() {
 
   const QVector<PlasmaScreenMapping> exactMappings{{QStringLiteral("HDMI-A-1"), 1},
                                                     {QStringLiteral("DP-2"), 0}};
-  failures += check(PlasmaWallpaperActivator::mappingsMatchWaylandOutputs(
+  failures += check(PlasmaWallpaperActivator::mappingsMatchOutputs(
                         exactMappings, outputs, &error),
                     "helper connectors must exactly match the daemon Wayland inventory");
   const QVector<PlasmaScreenMapping> missingMappings{{QStringLiteral("HDMI-A-1"), 1}};
-  failures += check(!PlasmaWallpaperActivator::mappingsMatchWaylandOutputs(
+  failures += check(!PlasmaWallpaperActivator::mappingsMatchOutputs(
                         missingMappings, outputs, &error) &&
                         error.contains(QStringLiteral("exactly match")),
                     "missing helper connector rejects physical activation before renderer apply");
@@ -197,10 +197,18 @@ int main() {
       QJsonObject{{QStringLiteral("name"), QStringLiteral("HDMI-A-1")}},
       QJsonObject{{QStringLiteral("name"), QStringLiteral("DP-2")}},
       QJsonObject{{QStringLiteral("name"), QStringLiteral("UNKNOWN-9")}}};
-  failures += check(!PlasmaWallpaperActivator::mappingsMatchWaylandOutputs(
+  failures += check(!PlasmaWallpaperActivator::mappingsMatchOutputs(
                         exactMappings, unknownOutputs, &error) &&
                         error.contains(QStringLiteral("exactly match")),
                     "unknown daemon connector rejects physical activation before renderer apply");
+  const QJsonArray x11Outputs{
+      QJsonObject{{QStringLiteral("name"), QStringLiteral("HDMI-A-0")}},
+      QJsonObject{{QStringLiteral("name"), QStringLiteral("DisplayPort-0")}}};
+  const QVector<PlasmaScreenMapping> x11Mappings{
+      {QStringLiteral("HDMI-A-0"), 0}, {QStringLiteral("DisplayPort-0"), 1}};
+  failures += check(PlasmaWallpaperActivator::mappingsMatchOutputs(
+                        x11Mappings, x11Outputs, &error),
+                    "X11 connector spellings are accepted as session output identities");
 
   reset(&transport);
   const QString escapedOutput = QStringLiteral("HDMI-\"A\\1");

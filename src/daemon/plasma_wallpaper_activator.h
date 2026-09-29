@@ -95,13 +95,13 @@ class PlasmaWallpaperActivator final {
  public:
   explicit PlasmaWallpaperActivator(PlasmaWallpaperTransport *transport);
 
-  // A matching actual Wayland output is the sole condition for invoking
-  // Plasma.  Preview and fixture labels intentionally remain renderer-only.
+  // A matching actual session output is the sole condition for invoking
+  // Plasma. Preview and fixture labels intentionally remain renderer-only.
   static bool isCanonicalOutputRequest(const QString &requested);
   static QString connectedOutputIdentity(const QString &requested,
-                                         const QJsonArray &waylandOutputs);
-  static bool mappingsMatchWaylandOutputs(const QVector<PlasmaScreenMapping> &mappings,
-                                          const QJsonArray &waylandOutputs,
+                                         const QJsonArray &outputs);
+  static bool mappingsMatchOutputs(const QVector<PlasmaScreenMapping> &mappings,
+                                          const QJsonArray &outputs,
                                           QString *error);
 
   bool preflight(const QString &output, const QString &scaleMode,

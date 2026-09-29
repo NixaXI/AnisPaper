@@ -142,7 +142,7 @@ bool IsolatedRenderer::start(QString *error) {
   // DP-2's mode during a dual-output restore and leave the 640x480 fallback;
   // the child FBO and scale_vaapi follow these numbers.
   if (!spec_.output.isEmpty()) {
-    const QSize physical = physicalWaylandOutputSize(spec_.output);
+    const QSize physical = physicalSessionOutputSize(spec_.output);
     if (physical.width() >= 64 && physical.width() <= 3840 &&
         physical.height() >= 64 && physical.height() <= 2160) {
       if (physical.width() != spec_.width || physical.height() != spec_.height) {
@@ -295,10 +295,12 @@ bool IsolatedRenderer::start(QString *error) {
   env.insert(QStringLiteral("PULSE_PROP_application.name"),
              QStringLiteral("AnisPaper"));
   env.insert(QStringLiteral("PULSE_PROP_media.role"), QStringLiteral("music"));
-  // The scene engine child renders offscreen through a hidden GLFW X11 window
-  // (XWayland under Wayland), so it always needs a DISPLAY.
-  if (!env.contains(QStringLiteral("DISPLAY"))) {
-    env.insert(QStringLiteral("DISPLAY"), QStringLiteral(":0"));
+  // The scene engine child renders through a hidden GLFW X11 window (XWayland
+  // in a Wayland session). A guessed :0 can target a different server or fail
+  // authorization, so require the display exported by this desktop session.
+  if (isScene && env.value(QStringLiteral("DISPLAY")).trimmed().isEmpty()) {
+    if (error) *error = QStringLiteral("scene renderer requires the current session DISPLAY");
+    return false;
   }
   // A user service can start before the graphical session exports XAUTHORITY
   // to the user manager.  XWayland still creates its per-session cookie in
@@ -320,12 +322,9 @@ bool IsolatedRenderer::start(QString *error) {
             {QStringLiteral("xauth_*")}, QDir::Files | QDir::Readable |
                                           QDir::NoSymLinks,
             QDir::Time);
-        for (const QFileInfo &candidate : candidates) {
-          if (candidate.isFile() && candidate.ownerId() == geteuid()) {
-            env.insert(QStringLiteral("XAUTHORITY"),
-                      candidate.absoluteFilePath());
-            break;
-          }
+        if (candidates.size() == 1 && candidates.constFirst().isFile() &&
+            candidates.constFirst().ownerId() == geteuid()) {
+          env.insert(QStringLiteral("XAUTHORITY"), candidates.constFirst().absoluteFilePath());
         }
       }
     }

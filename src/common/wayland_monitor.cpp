@@ -1,16 +1,23 @@
 #include "wayland_monitor.h"
 #include <wayland-client.h>
 #include <QDir>
+#include <QCryptographicHash>
+#include <QFile>
 #include <QJsonObject>
 #include <QStringList>
 #include <algorithm>
 #include <chrono>
 #include <poll.h>
-#include <memory>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <cerrno>
 #include <vector>
+#include <memory>
+#include <X11/Xlib.h>
+#include <X11/extensions/Xrandr.h>
+#undef Unsorted
+#undef None
+#undef Success
 namespace {
 struct Output {
   uint32_t global{};
@@ -126,6 +133,142 @@ QSize physicalWaylandOutputSize(const QString &outputName) {
       const int height = physical.value(QStringLiteral("height")).toInt();
       if (width > 0 && height > 0) return {width, height};
     }
+  }
+  return {};
+}
+
+namespace {
+QByteArray edidForX11Output(Display *display, RROutput output) {
+  const Atom property = XInternAtom(display, "EDID", True);
+  if (property == 0) return {};
+  Atom actualType = 0;
+  int actualFormat = 0;
+  unsigned long count = 0;
+  unsigned long remaining = 0;
+  unsigned char *value = nullptr;
+  const int status = XRRGetOutputProperty(display, output, property, 0, 256,
+                                           False, False, AnyPropertyType,
+                                           &actualType, &actualFormat, &count,
+                                           &remaining, &value);
+  QByteArray bytes;
+  if (status == 0 && actualFormat == 8 && value && count >= 128) {
+    bytes = QByteArray(reinterpret_cast<const char *>(value), static_cast<qsizetype>(count));
+  }
+  if (value) XFree(value);
+  return bytes;
+}
+
+QJsonArray listX11Outputs() {
+  QJsonArray result;
+  const QByteArray displayName = qgetenv("DISPLAY");
+  if (displayName.isEmpty()) return result;
+  Display *display = XOpenDisplay(displayName.constData());
+  if (!display) return result;
+  XRRScreenResources *resources = XRRGetScreenResourcesCurrent(display, DefaultRootWindow(display));
+  if (!resources) {
+    XCloseDisplay(display);
+    return result;
+  }
+  for (int index = 0; index < resources->noutput; ++index) {
+    const RROutput output = resources->outputs[index];
+    XRROutputInfo *info = XRRGetOutputInfo(display, resources, output);
+    if (!info) continue;
+    if (info->connection == RR_Connected && info->crtc != 0 && info->name && info->nameLen > 0) {
+      XRRCrtcInfo *crtc = XRRGetCrtcInfo(display, resources, info->crtc);
+      if (crtc && crtc->width > 0 && crtc->height > 0) {
+        const QString name = QString::fromUtf8(info->name, info->nameLen);
+        const QByteArray edid = edidForX11Output(display, output);
+        const QString identity = edid.isEmpty() ? QString() :
+            QStringLiteral("edid:") + QString::fromLatin1(
+                QCryptographicHash::hash(edid, QCryptographicHash::Sha256).toHex());
+        QJsonObject row{{QStringLiteral("name"), name},
+                        {QStringLiteral("geometry"), QJsonObject{
+                            {QStringLiteral("x"), crtc->x}, {QStringLiteral("y"), crtc->y},
+                            {QStringLiteral("width"), static_cast<int>(crtc->width)},
+                            {QStringLiteral("height"), static_cast<int>(crtc->height)}}},
+                        {QStringLiteral("physicalSize"), QJsonObject{
+                            {QStringLiteral("width"), static_cast<int>(crtc->width)},
+                            {QStringLiteral("height"), static_cast<int>(crtc->height)}}}};
+        if (!identity.isEmpty()) row.insert(QStringLiteral("identity"), identity);
+        result.append(row);
+      }
+      if (crtc) XRRFreeCrtcInfo(crtc);
+    }
+    XRRFreeOutputInfo(info);
+  }
+  XRRFreeScreenResources(resources);
+  XCloseDisplay(display);
+  return result;
+}
+
+QString drmEdidIdentity(const QString &requestedName) {
+  // Wayland connector names are generally DRM names (DP-1, HDMI-A-1). Match
+  // the complete connector suffix, never a numeric suffix or substring.
+  const QString suffix = requestedName.section(QLatin1Char('-'), -2);
+  QDir drm(QStringLiteral("/sys/class/drm"));
+  const QStringList paths = drm.entryList({QStringLiteral("card*-*")},
+                                           QDir::Dirs | QDir::System, QDir::Name);
+  QString match;
+  for (const QString &entry : paths) {
+    const QString connector = entry.mid(entry.indexOf(QLatin1Char('-')) + 1);
+    if (connector != requestedName && connector != suffix) continue;
+    QFile file(drm.filePath(entry + QStringLiteral("/edid")));
+    if (!file.open(QIODevice::ReadOnly)) continue;
+    const QByteArray edid = file.read(4096);
+    if (edid.size() < 128) continue;
+    const QString identity = QStringLiteral("edid:") + QString::fromLatin1(
+        QCryptographicHash::hash(edid, QCryptographicHash::Sha256).toHex());
+    if (!match.isEmpty() && match != identity) return {};
+    match = identity;
+  }
+  return match;
+}
+} // namespace
+
+QString graphicalSessionType() {
+  QString type = qEnvironmentVariable("ANISPAPER_SESSION_TYPE").trimmed().toLower();
+  if (type.isEmpty()) type = qEnvironmentVariable("XDG_SESSION_TYPE").trimmed().toLower();
+  if (type == QStringLiteral("x11") || type == QStringLiteral("wayland")) return type;
+  // Do not infer Wayland from a stale socket when X11 is the active session.
+  if (!qEnvironmentVariableIsEmpty("DISPLAY") && qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY"))
+    return QStringLiteral("x11");
+  if (!qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY")) return QStringLiteral("wayland");
+  return {};
+}
+
+QJsonArray listSessionOutputs() {
+  const QString session = graphicalSessionType();
+  if (session == QStringLiteral("x11")) return listX11Outputs();
+  if (session == QStringLiteral("wayland")) {
+    QJsonArray outputs = listWaylandOutputs();
+    for (qsizetype i = 0; i < outputs.size(); ++i) {
+      QJsonObject row = outputs.at(i).toObject();
+      const QString identity = drmEdidIdentity(row.value(QStringLiteral("name")).toString());
+      if (!identity.isEmpty()) row.insert(QStringLiteral("identity"), identity);
+      outputs.replace(i, row);
+    }
+    return outputs;
+  }
+  return {};
+}
+
+QSize physicalSessionOutputSize(const QString &outputName) {
+  for (const QJsonValue &value : listSessionOutputs()) {
+    const QJsonObject row = value.toObject();
+    if (row.value(QStringLiteral("name")).toString() != outputName) continue;
+    const QJsonObject size = row.value(QStringLiteral("physicalSize")).toObject();
+    const int width = size.value(QStringLiteral("width")).toInt();
+    const int height = size.value(QStringLiteral("height")).toInt();
+    if (width > 0 && height > 0) return {width, height};
+  }
+  return {};
+}
+
+QString stableOutputIdentity(const QString &outputName) {
+  for (const QJsonValue &value : listSessionOutputs()) {
+    const QJsonObject row = value.toObject();
+    if (row.value(QStringLiteral("name")).toString() == outputName)
+      return row.value(QStringLiteral("identity")).toString();
   }
   return {};
 }

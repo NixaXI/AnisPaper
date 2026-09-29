@@ -10,6 +10,13 @@
 #include <cstdio>
 #include <algorithm>
 #include <cstring>
+#include <vector>
+#include <X11/Xlib.h>
+#include <X11/Xatom.h>
+#include <X11/extensions/Xrandr.h>
+#undef Unsorted
+#undef None
+#undef Success
 
 namespace {
 struct RawOrder {
@@ -68,13 +75,84 @@ bool rawKWinOutputOrder(QStringList *order, QString *error) {
   *order = state.names;
   return true;
 }
+
+bool rawX11OutputOrder(QStringList *order, QString *error) {
+  Display *display = XOpenDisplay(nullptr);
+  if (!display) {
+    if (error) *error = QStringLiteral("could not connect to X11 for Plasma output order");
+    return false;
+  }
+  XRRScreenResources *resources =
+      XRRGetScreenResourcesCurrent(display, DefaultRootWindow(display));
+  if (!resources) {
+    XCloseDisplay(display);
+    if (error) *error = QStringLiteral("could not read XRandR output resources");
+    return false;
+  }
+  const Atom indexAtom = XInternAtom(display, "_KDE_SCREEN_INDEX", True);
+  std::vector<std::pair<unsigned long, QString>> indexed;
+  bool valid = indexAtom != 0;
+  for (int i = 0; valid && i < resources->noutput; ++i) {
+    XRROutputInfo *info = XRRGetOutputInfo(display, resources, resources->outputs[i]);
+    if (!info) { valid = false; break; }
+    if (info->connection == RR_Connected && info->crtc != 0) {
+      Atom actualType = 0;
+      int actualFormat = 0;
+      unsigned long count = 0, remaining = 0;
+      unsigned char *value = nullptr;
+      const int status = XRRGetOutputProperty(display, resources->outputs[i], indexAtom,
+                                               0, 1, False, False, AnyPropertyType,
+                                               &actualType, &actualFormat, &count,
+                                               &remaining, &value);
+      if (status != 0 || (actualType != XA_CARDINAL && actualType != XA_INTEGER) ||
+          actualFormat != 32 ||
+          count != 1 || !value) {
+        valid = false;
+      } else {
+        const unsigned long screenIndex = *reinterpret_cast<unsigned long *>(value);
+        // KDE uses 0 to disable an output; active Plasma screen indexes start at 1.
+        if (screenIndex > 0) {
+          indexed.emplace_back(screenIndex,
+                                QString::fromUtf8(info->name, info->nameLen));
+        }
+      }
+      if (value) XFree(value);
+    }
+    XRRFreeOutputInfo(info);
+  }
+  XRRFreeScreenResources(resources);
+  XCloseDisplay(display);
+  std::sort(indexed.begin(), indexed.end(), [](const auto &left, const auto &right) {
+    return left.first < right.first;
+  });
+  if (!valid || indexed.empty()) {
+    if (error) *error = QStringLiteral("X11 Plasma _KDE_SCREEN_INDEX mapping is unavailable or invalid");
+    return false;
+  }
+  for (size_t i = 0; i < indexed.size(); ++i) {
+    if ((i && indexed[i - 1].first == indexed[i].first) ||
+        indexed[i].first != i + 1 || indexed[i].second.isEmpty()) {
+      if (error) *error = QStringLiteral("X11 Plasma screen indexes are duplicated or non-contiguous");
+      return false;
+    }
+    order->push_back(indexed[i].second);
+  }
+  return true;
+}
 }  // namespace
 
 int main(int argc, char **argv) {
   QGuiApplication app(argc, argv);
+  const QString session = qEnvironmentVariable("ANISPAPER_SESSION_TYPE",
+                                                qEnvironmentVariable("XDG_SESSION_TYPE")).toLower();
+  const bool x11 = session == QStringLiteral("x11") ||
+                   (session.isEmpty() && !qEnvironmentVariableIsEmpty("DISPLAY") &&
+                    qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY"));
   QStringList outputOrder;
   QString error;
-  if (!rawKWinOutputOrder(&outputOrder, &error)) {
+  const bool mapped = x11 ? rawX11OutputOrder(&outputOrder, &error)
+                          : rawKWinOutputOrder(&outputOrder, &error);
+  if (!mapped) {
     std::fputs(qPrintable(error + QLatin1Char('\n')), stderr);
     return 1;
   }

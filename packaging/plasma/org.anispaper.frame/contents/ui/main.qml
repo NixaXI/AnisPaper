@@ -10,7 +10,13 @@ WallpaperItem {
 
     readonly property string frameOutput: {
         const configured = String(root.configuration.Output || "").trim()
-        return configured.length > 0 ? configured : Screen.name
+        const current = String(Screen.name || "").trim()
+        // Configuration written by a different display backend can name a
+        // connector that no longer exists (for example HDMI-A-1 on Wayland
+        // versus HDMI-A-0 on X11). Each WallpaperItem belongs to one screen;
+        // use its live connector when the stored value is stale.
+        return current.length > 0 && configured !== current ? current
+             : configured.length > 0 ? configured : current
     }
     readonly property real frameNo: watcher.frameNo
     readonly property string scaleMode: {

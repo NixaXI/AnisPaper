@@ -420,7 +420,7 @@ int runRendererChild(int argc, char **argv) {
     }
   }
   if (!spec.output.isEmpty()) {
-    const QSize physical = physicalWaylandOutputSize(spec.output);
+    const QSize physical = physicalSessionOutputSize(spec.output);
     if (physical.width() >= 64 && physical.width() <= 3840 &&
         physical.height() >= 64 && physical.height() <= 2160) {
       spec.width = physical.width();

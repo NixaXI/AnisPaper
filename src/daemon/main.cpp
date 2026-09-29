@@ -255,7 +255,7 @@ class SettingsStore {
 };
 
 
-QHash<QString, QString> loadWallpaperState() {
+QHash<QString, QString> loadWallpaperState(QHash<QString, QString> *identities) {
   QHash<QString, QString> state;
   QFile file(wallpaperStatePath());
   if (!file.exists()) return state;
@@ -273,7 +273,8 @@ QHash<QString, QString> loadWallpaperState() {
   }
 
   const QJsonObject root = document.object();
-  if (root.value("version").toInt(-1) != 1 || !root.value("outputs").isObject()) {
+  const int version = root.value("version").toInt(-1);
+  if ((version != 1 && version != 2) || !root.value("outputs").isObject()) {
     qWarning().noquote() << "wallpaper restore state has unsupported format; ignoring it";
     return {};
   }
@@ -290,18 +291,32 @@ QHash<QString, QString> loadWallpaperState() {
     }
     state.insert(output, id);
   }
+  if (identities && version >= 2 && root.value("identities").isObject()) {
+    const QJsonObject storedIdentities = root.value("identities").toObject();
+    for (auto it = storedIdentities.begin(); it != storedIdentities.end(); ++it) {
+      if (state.contains(it.key()) && it.value().isString() &&
+          it.value().toString().startsWith(QStringLiteral("edid:"))) {
+        identities->insert(it.key(), it.value().toString());
+      }
+    }
+  }
   return state;
 }
 
-bool saveWallpaperState(const QHash<QString, QString> &state, QString *error) {
+bool saveWallpaperState(const QHash<QString, QString> &state,
+                        const QHash<QString, QString> &identities, QString *error) {
   QJsonObject outputs;
+  QJsonObject storedIdentities;
   for (auto it = state.cbegin(); it != state.cend(); ++it) {
     outputs.insert(it.key(), it.value());
+    const QString identity = identities.value(it.key());
+    if (!identity.isEmpty()) storedIdentities.insert(it.key(), identity);
   }
 
   QJsonObject root;
-  root.insert("version", 1);
+  root.insert("version", 2);
   root.insert("outputs", outputs);
+  root.insert("identities", storedIdentities);
 
   QDir().mkpath(QFileInfo(wallpaperStatePath()).absolutePath());
   QSaveFile file(wallpaperStatePath());
@@ -611,7 +626,15 @@ class GamingDbusAdaptor : public QObject {
   // means nothing is covered.  Per-output so a fullscreen window on one screen
   // leaves the other screen's wallpaper running.
   void setCoveredOutputs(const QStringList &outputs) {
-    if (renderers_) renderers_->setCoveredOutputs(outputs);
+    if (!renderers_) return;
+    // The KWin watcher is supported on Wayland. On X11, ignore stale or
+    // unavailable watcher reports so an old fullscreen state cannot freeze
+    // every live wallpaper after a session switch.
+    if (graphicalSessionType() == QStringLiteral("x11")) {
+      renderers_->setCoveredOutputs({});
+      return;
+    }
+    renderers_->setCoveredOutputs(outputs);
   }
 
  private:
@@ -630,8 +653,11 @@ class Daemon : public QObject {
               const QString wallpaperId = event.value("id").toString();
               if (!output.isEmpty() && !wallpaperId.isEmpty()) {
                 savedWallpapers_.insert(output, wallpaperId);
+                const QString identity = stableOutputIdentity(output);
+                if (identity.isEmpty()) savedWallpaperIdentities_.remove(output);
+                else savedWallpaperIdentities_.insert(output, identity);
                 QString stateError;
-                if (!saveWallpaperState(savedWallpapers_, &stateError)) {
+                if (!saveWallpaperState(savedWallpapers_, savedWallpaperIdentities_, &stateError)) {
                   qWarning().noquote()
                       << "could not save wallpaper restore state:" << stateError;
                 }
@@ -644,8 +670,9 @@ class Daemon : public QObject {
               const QString reason = event.value("reason").toString();
               if (reason == QStringLiteral("stopped") && !output.isEmpty()) {
                 if (savedWallpapers_.remove(output) > 0) {
+                  savedWallpaperIdentities_.remove(output);
                   QString stateError;
-                  if (!saveWallpaperState(savedWallpapers_, &stateError)) {
+                  if (!saveWallpaperState(savedWallpapers_, savedWallpaperIdentities_, &stateError)) {
                     qWarning().noquote()
                         << "could not save wallpaper restore state:" << stateError;
                   }
@@ -660,7 +687,7 @@ class Daemon : public QObject {
     settings_ = store_.load();
     renderers_->setGamingMode(settings_.gamingMode);
     renderers_->setGamingBlacklist(settings_.gamingBlacklist);
-    savedWallpapers_ = loadWallpaperState();
+    savedWallpapers_ = loadWallpaperState(&savedWallpaperIdentities_);
     propertyOverrides_ = loadWallpaperProperties();
     registerGamingBus();
     refreshAsync();
@@ -850,19 +877,33 @@ class Daemon : public QObject {
   void restoreSavedWallpapers() {
     if (savedWallpapers_.isEmpty()) return;
 
-    const QJsonArray outputs = listWaylandOutputs();
+    const QJsonArray outputs = listSessionOutputs();
     if (outputs.isEmpty()) {
       scheduleWallpaperRestoreRetry();
       return;
     }
 
     int pending = 0;
-    for (auto it = savedWallpapers_.cbegin(); it != savedWallpapers_.cend(); ++it) {
+    const QHash<QString, QString> assignments = savedWallpapers_;
+    for (auto it = assignments.cbegin(); it != assignments.cend(); ++it) {
       const QString savedOutput = it.key();
       const QString wallpaperId = it.value();
 
-      const QString output =
-          PlasmaWallpaperActivator::connectedOutputIdentity(savedOutput, outputs);
+      QString output = PlasmaWallpaperActivator::connectedOutputIdentity(savedOutput, outputs);
+      if (output.isEmpty()) {
+        const QString wantedIdentity = savedWallpaperIdentities_.value(savedOutput);
+        if (!wantedIdentity.isEmpty()) {
+          QString candidate;
+          int matches = 0;
+          for (const QJsonValue &value : outputs) {
+            const QJsonObject monitor = value.toObject();
+            if (monitor.value(QStringLiteral("identity")).toString() != wantedIdentity) continue;
+            candidate = monitor.value(QStringLiteral("name")).toString();
+            ++matches;
+          }
+          if (matches == 1) output = candidate;
+        }
+      }
       if (output.isEmpty()) {
         ++pending;
         continue;
@@ -901,7 +942,7 @@ class Daemon : public QObject {
         continue;
       }
 
-      if (!PlasmaWallpaperActivator::mappingsMatchWaylandOutputs(
+      if (!PlasmaWallpaperActivator::mappingsMatchOutputs(
               plasmaPlan.mappingsBefore, outputs, &plasmaError)) {
         ++pending;
         qWarning().noquote()
@@ -927,7 +968,7 @@ class Daemon : public QObject {
         renderers_->stop(output);
         savedWallpapers_.insert(savedOutput, wallpaperId);
         QString stateError;
-        if (!saveWallpaperState(savedWallpapers_, &stateError)) {
+        if (!saveWallpaperState(savedWallpapers_, savedWallpaperIdentities_, &stateError)) {
           qWarning().noquote()
               << "could not preserve boot restore state after Plasma failure:"
               << stateError;
@@ -938,6 +979,17 @@ class Daemon : public QObject {
             << "boot restore Plasma commit failed for" << output
             << wallpaperId << ":" << plasmaError;
         continue;
+      }
+
+      if (output != savedOutput) {
+        savedWallpapers_.remove(savedOutput);
+        savedWallpaperIdentities_.remove(savedOutput);
+        savedWallpapers_.insert(output, wallpaperId);
+        const QString identity = stableOutputIdentity(output);
+        if (!identity.isEmpty()) savedWallpaperIdentities_.insert(output, identity);
+        QString stateError;
+        if (!saveWallpaperState(savedWallpapers_, savedWallpaperIdentities_, &stateError))
+          qWarning().noquote() << "could not update migrated wallpaper state:" << stateError;
       }
 
       qInfo().noquote()
@@ -1102,7 +1154,7 @@ class Daemon : public QObject {
 
   QJsonArray monitors() const {
     QJsonArray result;
-    for (const auto value : listWaylandOutputs()) {
+    for (const auto value : listSessionOutputs()) {
       QJsonObject output = value.toObject();
       output.insert("currentWallpaperId",
                     renderers_->wallpaperId(output.value("name").toString()));
@@ -1376,9 +1428,9 @@ class Daemon : public QObject {
       }
       RendererOptions options{qBound(1, settings_.fpsCap, 60), settings_.defaultVolume,
                               settings_.wallpaperScaleMode};
-      const QJsonArray waylandOutputs = listWaylandOutputs();
+      const QJsonArray sessionOutputs = listSessionOutputs();
       const QString connectedOutput = PlasmaWallpaperActivator::connectedOutputIdentity(
-          output, waylandOutputs);
+          output, sessionOutputs);
       PlasmaActivationPlan plasmaPlan;
       std::optional<PlasmaDbusTransport> plasmaTransport;
       std::optional<PlasmaWallpaperActivator> plasmaActivator;
@@ -1391,8 +1443,8 @@ class Daemon : public QObject {
           fail(-32003, QStringLiteral("Plasma activation mapping unavailable: %1").arg(plasmaError));
           return;
         }
-        if (!PlasmaWallpaperActivator::mappingsMatchWaylandOutputs(
-                plasmaPlan.mappingsBefore, waylandOutputs, &plasmaError)) {
+        if (!PlasmaWallpaperActivator::mappingsMatchOutputs(
+                plasmaPlan.mappingsBefore, sessionOutputs, &plasmaError)) {
           fail(-32003, QStringLiteral("Plasma activation mapping unavailable: %1").arg(plasmaError));
           return;
         }
@@ -1585,7 +1637,7 @@ class Daemon : public QObject {
         frame = renderers_->lastFrame(requestedOutput);
       }
       if (!requireActive && frame.isNull()) {
-        for (const auto &monitor : listWaylandOutputs()) {
+        for (const auto &monitor : listSessionOutputs()) {
           const QString name = monitor.toObject().value("name").toString();
           frame = renderers_->lastFrame(name);
           if (!frame.isNull()) { usedOutput = name; break; }
@@ -1808,6 +1860,7 @@ class Daemon : public QObject {
   SettingsStore store_;
   Settings settings_;
   QHash<QString, QString> savedWallpapers_;
+  QHash<QString, QString> savedWallpaperIdentities_;
   QHash<QString, QJsonObject> propertyOverrides_;
   QJsonArray catalog_;
   QLocalServer server_;

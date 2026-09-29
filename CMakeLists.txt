@@ -6,6 +6,8 @@ include(CTest)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
+pkg_check_modules(XRANDR REQUIRED IMPORTED_TARGET xrandr)
+pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
 find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
 
 set(PROBE_PROTOCOL ${CMAKE_CURRENT_SOURCE_DIR}/src/probe/protocols/wlr-layer-shell-unstable-v1.xml)
@@ -132,6 +134,8 @@ target_link_libraries(anis-paperd PRIVATE
     Qt6::WebChannel
     anispaper-bridge
     PkgConfig::WAYLAND_CLIENT
+    PkgConfig::XRANDR
+    PkgConfig::X11
     PkgConfig::MPV
 )
 if(KF6Auth_FOUND)
@@ -149,7 +153,7 @@ add_executable(anispaper-plasma-output-map
 set_source_files_properties(${OUTPUT_ORDER_CODE} PROPERTIES GENERATED TRUE)
 target_compile_features(anispaper-plasma-output-map PRIVATE cxx_std_20)
 target_include_directories(anispaper-plasma-output-map PRIVATE ${PROBE_GENERATED_DIR})
-target_link_libraries(anispaper-plasma-output-map PRIVATE Qt6::Core Qt6::Gui Qt6::DBus PkgConfig::WAYLAND_CLIENT)
+target_link_libraries(anispaper-plasma-output-map PRIVATE Qt6::Core Qt6::Gui Qt6::DBus PkgConfig::WAYLAND_CLIENT PkgConfig::XRANDR PkgConfig::X11)
 target_compile_options(anispaper-plasma-output-map PRIVATE -Wall -Wextra -Wpedantic)
 add_dependencies(anis-paperd anispaper-plasma-output-map)
 
@@ -208,6 +212,8 @@ if(ANISPAPER_ENABLE_SCENE_ENGINE)
   install(TARGETS anis-paper-scene-engine RUNTIME DESTINATION bin)
 endif()
 install(PROGRAMS tools/sddm/anispaper-sddm-install
+        DESTINATION libexec/anispaper)
+install(PROGRAMS packaging/systemd/anis-paperd-session-wrapper
         DESTINATION libexec/anispaper)
 install(FILES assets/anispaper/fallback.jpg DESTINATION share/anispaper)
 install(FILES assets/anis-star.png DESTINATION share/icons/hicolor/256x256/apps)
@@ -313,7 +319,7 @@ if(BUILD_TESTING)
       src/common/wayland_monitor.cpp)
   target_compile_features(anispaper-isolated-renderer-cleanup-test PRIVATE cxx_std_20)
   target_link_libraries(anispaper-isolated-renderer-cleanup-test PRIVATE
-      anispaper-bridge Qt6::Core Qt6::Gui PkgConfig::WAYLAND_CLIENT)
+      anispaper-bridge Qt6::Core Qt6::Gui PkgConfig::WAYLAND_CLIENT PkgConfig::XRANDR PkgConfig::X11)
   target_compile_definitions(anispaper-isolated-renderer-cleanup-test PRIVATE
       ANISPAPER_ISOLATED_RENDERER_TESTING=1)
   target_compile_options(anispaper-isolated-renderer-cleanup-test PRIVATE -Wall -Wextra -Wpedantic)
@@ -385,6 +391,7 @@ if(BUILD_TESTING)
   set_tests_properties(f4_integration PROPERTIES SKIP_RETURN_CODE 77)
   add_test(NAME audio_fps_contract COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/audio_fps_contract.py)
   add_test(NAME web_sandbox_contract COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/web_sandbox_contract.py)
+  add_test(NAME ui_preview_cards_contract COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/ui_preview_cards_contract.py)
   add_test(NAME game_pause_contract COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/game_pause_contract.py)
   add_test(NAME gaming_blacklist_contract COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/gaming_blacklist_contract.py)
   add_test(NAME signal_shutdown_contract COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/signal_shutdown_contract.py)

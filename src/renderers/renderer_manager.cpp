@@ -514,7 +514,7 @@ RendererSpec RendererManager::makeSpec(const QJsonObject &item,
                          ? mode
                          : QStringLiteral("cover");
   }
-  const QSize physical = physicalWaylandOutputSize(output);
+  const QSize physical = physicalSessionOutputSize(output);
   if (physical.width() >= 64 && physical.width() <= 3840 &&
       physical.height() >= 64 && physical.height() <= 2160) {
     spec.width = physical.width();

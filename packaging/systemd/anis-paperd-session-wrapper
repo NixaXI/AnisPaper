@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (($# == 0)); then
+  echo "anis-paperd-session-wrapper: expected daemon executable" >&2
+  exit 64
+fi
+
+runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+session="${XDG_SESSION_TYPE:-}"
+if [[ -n "${XDG_SESSION_ID:-}" ]]; then
+  # The user manager can retain environment values from an earlier login.
+  # Prefer logind's type for the active session whenever it is available.
+  active_session="$(loginctl show-session "$XDG_SESSION_ID" -p Type --value 2>/dev/null || true)"
+  if [[ "$active_session" == x11 || "$active_session" == wayland ]]; then
+    session="$active_session"
+  fi
+fi
+
+case "$session" in
+  x11)
+    unset WAYLAND_DISPLAY || true
+    export QT_QPA_PLATFORM=xcb
+    ;;
+  wayland)
+    wayland_socket=""
+    if [[ -n "${WAYLAND_DISPLAY:-}" && -S "$runtime/${WAYLAND_DISPLAY}" ]]; then
+      wayland_socket="$WAYLAND_DISPLAY"
+    else
+      found=""
+      for candidate in "$runtime"/wayland-*; do
+        [[ -S "$candidate" ]] || continue
+        [[ -n "$found" ]] && { echo "anis-paperd-session-wrapper: ambiguous Wayland sockets" >&2; exit 1; }
+        found="${candidate##*/}"
+      done
+      wayland_socket="$found"
+    fi
+    [[ -n "$wayland_socket" ]] || { echo "anis-paperd-session-wrapper: Wayland session has no socket" >&2; exit 1; }
+    export WAYLAND_DISPLAY="$wayland_socket"
+    export QT_QPA_PLATFORM=wayland
+    ;;
+  *)
+    # Infer X11 only when its display is set and there is no live Wayland socket.
+    live_wayland=0
+    for candidate in "$runtime"/wayland-*; do
+      [[ -S "$candidate" ]] && live_wayland=1 && break
+    done
+    if [[ -n "${DISPLAY:-}" && "$live_wayland" == 0 ]]; then
+      session=x11
+      unset WAYLAND_DISPLAY || true
+      export QT_QPA_PLATFORM=xcb
+    elif [[ -n "${WAYLAND_DISPLAY:-}" && -S "$runtime/${WAYLAND_DISPLAY}" ]]; then
+      session=wayland
+      export QT_QPA_PLATFORM=wayland
+    else
+      echo "anis-paperd-session-wrapper: cannot identify graphical session" >&2
+      exit 1
+    fi
+    ;;
+esac
+
+export ANISPAPER_SESSION_TYPE="$session"
+export XDG_RUNTIME_DIR="$runtime"
+
+# Do not fabricate :0. On this machine X11 uses :0, but multi-seat/session
+# setups can use a different server and must pass its actual value.
+if [[ -z "${DISPLAY:-}" ]]; then
+  echo "anis-paperd-session-wrapper: DISPLAY is unset; X11 scene rendering will be unavailable" >&2
+fi
+
+if [[ -z "${XAUTHORITY:-}" || ! -r "$XAUTHORITY" ]]; then
+  candidates=()
+  for candidate in "$runtime"/xauth_*; do
+    [[ -f "$candidate" && -r "$candidate" ]] && candidates+=("$candidate")
+  done
+  if ((${#candidates[@]} == 1)); then
+    export XAUTHORITY="${candidates[0]}"
+  else
+    unset XAUTHORITY || true
+  fi
+fi
+
+exec "$@"
