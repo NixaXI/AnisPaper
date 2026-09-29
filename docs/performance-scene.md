@@ -68,8 +68,8 @@ Plan aplicado (ver secciones de cambios más abajo):
    transport→bridge SHM directa; si la geometría o metadata no coincide,
    conserva la ruta `QImage` con conversión/escalado. JSON solo para líneas de
    control pequeñas.
-6. Plugin: watcher C++ event-driven (16 ms, solo recarga cuando cambia
-   `frameNo` real del header SHM) + provider mapeo cacheado.
+6. Plugin: watcher C++ event-driven (poll del header; notifica sólo cuando
+   cambia `frameNo` del bridge SHM) + provider con mapeo/caché por output.
 7. Fullscreen pause reactivado (gaming-friendly): el engine pausa solo cuando
    hay una ventana fullscreen (X11 detector sobre XWayland).
 8. `scene.targetFps` configurable (30/60), pacing del engine existente
@@ -227,9 +227,11 @@ Cambios adicionales de esta revisión:
 - Daemon: el slot triple-buffer del child se expone como `QImage` read-only y el
   bridge hace la **única** copia grande directamente al SHM de Plasma cuando el
   layout ya es RGBA8888 1:1.
-- Provider Plasma: carga forzada asíncrona y fd/mmap persistente por output para
-  sacar la copia de 1080p del GUI thread y eliminar open/fstat/mmap/munmap por
-  cada frame nuevo.
+- Provider Plasma: QML usa `asynchronous:false`; `requestImage()` hace la copia
+  `QImage::copy()` síncrona de cada frame nuevo. El mmap del bridge se conserva
+  por output, así que no hay open/fstat/mmap/munmap por frame. El upload de
+  textura Qt Quick y la presentación por el compositor son etapas posteriores
+  que este provider no mide.
 - Fullscreen X11: corregido el uso de `GLFWwindow*` como si fuese un XID y un
   `XFree(children)` equivocado que dejaba un use-after-free. Se usa
   `glfwGetX11Window()`, EWMH + geometría, y cache de 200 ms.
@@ -253,6 +255,123 @@ Con el mismo scene `steam:1155012801`, a 1920x1080 y target 60:
 No se anotan cifras AFTER aquí porque este snapshot no puede reproducir el
 stack CachyOS/KWin/AMD del equipo del usuario. Usar `tools/perf/deploy-and-probe.sh`
 para build/deploy + una única medición en hardware real.
+
+### Medición local RX 6600 — 2026-09-29
+
+Prueba breve A/B en CachyOS, KDE Plasma/Wayland, Mesa 26.2.3, AMD RX 6600
+(Navi 23), dos salidas 1920×1080 a 60 Hz. Las escenas nativas permanecieron
+fijas; Gaming Mode estaba inactivo. El límite persistido era 30 FPS; para la
+segunda pasada se pidió 60 temporalmente y luego se restauró a 30.
+
+| Cap pedido | FPS del renderer por salida | GPU busy (mediana) | potencia GPU (mediana) |
+|---:|---:|---:|---:|
+| 30 | DP-1: 29; HDMI-A-1: 28 | 21 % | 24 W |
+| 60 | ambas: 57.8 | 45 % | 27 W |
+
+Son muestras cortas (aprox. 10 s a 30 y 16 s a 60), con aplicaciones de
+fondo variables. La lectura de potencia es del sensor GPU, no del equipo
+completo; la lectura FPS de `status.get` refleja frames recibidos/aceptados por
+el renderer, no una confirmación de presentación de KWin. Esto demuestra que
+el cap 60 produce cerca de 58 FPS en esa configuración, con mayor actividad
+GPU; no alcanza para declarar eficiencia final ni atribuir la diferencia a
+una sola etapa. El cap quedó restaurado a 30 y los dos renderers siguieron
+activos sin crash.
+
+#### Perfil del proveedor Plasma (opt-in)
+
+Tras instalar una compilación que incluya `frame_image_provider.cpp` y cuando
+el plugin se haya cargado, se puede activar el perfil creando el marcador:
+
+```sh
+touch "$XDG_RUNTIME_DIR/anispaper-frame-profile"
+journalctl --user -f | rg 'ANISPAPER_PLASMA_PROVIDER'
+rm "$XDG_RUNTIME_DIR/anispaper-frame-profile"
+```
+
+Revisa el log `ANISPAPER_PLASMA_PROVIDER_TIMING` por salida cada ~5 s:
+requests, secuencias nuevas devueltas, requests repetidos y duración de
+`requestImage()`. `new_sequences_returned` cuenta secuencias distintas
+devueltas por el provider durante esa ventana; no equivale a frames subidos a
+textura ni presentados por el compositor. No reinicia servicios, pero el
+plugin cargado debe contener esta compilación.
+
+#### Siguiente comparación reproducible
+
+1. Fijar una escena conocida por salida y anotar resolución, scale mode,
+   compositor, versión Mesa/kernel, frecuencia y cap guardado.
+2. Con Gaming Mode inactivo y aplicaciones de fondo quietas, calentar 30 s y
+   medir al menos 120 s a 30 FPS, luego 120 s a 60 FPS. Repetir una sola salida
+   y dos salidas para separar costo por pantalla.
+3. Alinear en la misma ventana: renderer FPS de `status.get`, avance de
+   `frameNo` del FrameBridge, contadores de publicación del perfil del child y
+   `new_sequences_returned`/tiempo de `requestImage()` del provider; registrar
+   GPU busy, potencia, clocks, temperatura y CPU/RSS por proceso.
+4. Restaurar el cap persistido al valor inicial, borrar el marcador y
+   confirmar misma escena/salida, `hasFrame=true` y `crashes=0`.
+
+El A/B corto anterior sólo cubrió el primer muestreo. El perfil nuevo del
+provider se compiló, pero aún no está instalado/cargado; cuando se despliegue
+se podrá alinear con `frameNo` del bridge. El perfil actual del scene engine
+registra cadencia y etapas del callback, pero todavía no imprime un contador
+explícito de publicaciones SHM exitosas.
+
+### Repetición larga — 2026-09-29
+
+Se repitió la comparación con ventanas de 120 s y una muestra por segundo,
+dos salidas activas y las mismas escenas. Se calentó 10 s antes de 30 FPS y
+30 s antes de 60 FPS. Gaming Mode siguió inactivo. En cada muestra se comparó
+el delta de `bridge.frameNo`, además del FPS del renderer. Se midió el árbol de
+procesos del daemon (daemon + escenas), con `%CPU` expresado como porcentaje
+de un core; el sensor AMD reporta busy y potencia de GPU.
+
+| Cap | DP-1 bridge FPS | HDMI-A-1 bridge FPS | GPU busy | GPU power | CPU árbol daemon | RSS árbol |
+|---:|---:|---:|---:|---:|---:|---:|
+| 30 | 30.0 | 30.0 | 30.5 % | 23 W | 25 % de un core | 555 MiB |
+| 60 | 58.0 | 58.0 | 56 % | 27 W | 65 % de un core | 555 MiB |
+
+Los FPS del renderer dieron medianas de 29.97/29.94 a cap 30 y
+58.53/58.24 a cap 60. Hubo 120 muestras por cap, sin errores RPC, pérdidas de
+`hasFrame` ni crashes. La diferencia de GPU busy entre las corridas fue de
+25.5 puntos y la potencia del sensor subió 4 W. El proceso combinado usó unos
+40 puntos más de un core a 60; la memoria quedó estable. Esto caracteriza el
+costo de dos escenas en esta sesión, pero no permite atribuir CPU por
+componente ni mide potencia total del equipo.
+
+El `fpsCap` original (30) se restauró tras esta comparación inicial. Los IDs
+siguieron siendo `steam:3269963590` en DP-1 y `steam:3786911609` en HDMI-A-1;
+ambos terminaron con `hasFrame=true`, sin fallback y `crashes=0`. El JSON
+crudo quedó en `/tmp/anispaper-amd-ab-20260929.json`.
+
+#### Ajuste para cadencia de 60 FPS — misma RX 6600
+
+Se midió resolución interna del wallpaper al 90% (1728×972) frente a 100%,
+manteniendo los monitores en 1920×1080. A 90% no subió el FPS y la potencia
+GPU permaneció en 27 W; por eso no se dejó ese escalado activado. La prueba
+redujo carga de CPU/RSS ligeramente, pero no la GPU de forma material.
+
+El perfil del loop del engine identificó una espera evitable: el modo offscreen
+hacía `glfwSwapBuffers()` sobre un backbuffer oculto de 640×480 además de
+esperar el deadline del frame. Se omitió ese swap sólo en modo offscreen,
+conservando el swap normal del modo visible, y se añadió `glFlush()` después
+del fence PBO. Con resolución completa y cap 60, el periodo del loop medido
+quedó en ~16.73 ms (≈59.8 FPS), con callback de captura de ~1.5 ms y sin
+lecturas PBO perdidas en una ventana perfilada de 120 s.
+
+La corrida de 120 s sin perfil dio mediana de 59 FPS por monitor desde el
+bridge, renderer ~58.8 FPS, GPU busy mediana 62.5% y sensor 27 W. Una ventana
+agregada posterior de 30 s dio 58.80 FPS (DP-1) y 59.03 FPS (HDMI-A-1), GPU
+busy 58% y 27 W. Como referencia, otra lectura de 120 s antes de quitar el
+swap oculto registró busy 59% y 28 W; no es un A/B perfectamente controlado.
+Wallpapers, `hasFrame`, cero crashes y modos físicos
+1920×1080@60 se mantuvieron. El cap persistido quedó en 60 por ser la meta
+solicitada. Las cifras son frames publicados/recibidos antes del upload de
+textura y presentación del compositor; no prueban cada presentación a 60 Hz.
+
+El marcador de perfil y el marcador de resolución reducida se retiraron al
+finalizar. JSON de las mediciones: `/tmp/anispaper-amd-noswap-20260929.json`,
+`/tmp/anispaper-amd-noswap-unprofiled-20260929.json`,
+`/tmp/anispaper-amd-ab-90-20260929.json` y
+`/tmp/anispaper-amd-ab-100-profile-20260929.json`.
 
 ---
 

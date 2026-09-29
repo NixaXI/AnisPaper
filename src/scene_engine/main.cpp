@@ -61,6 +61,14 @@ struct StageProfiler {
     Clock::time_point prevCallback;
     bool havePrev = false;
     ::std::vector<double> periodMs, submitMs, waitMs, copyMs, jpegMs, b64Ms, ipcWriteMs, callbackMs;
+    uint64_t captureSubmitted = 0;
+    uint64_t readbackMisses = 0;
+    uint64_t publishedShm = 0;
+    uint64_t publishedFallback = 0;
+
+    void count (uint64_t& counter) {
+        if (enabled) ++counter;
+    }
 
     static double ms (Clock::time_point a, Clock::time_point b) {
         return ::std::chrono::duration<double, ::std::milli> (b - a).count ();
@@ -102,6 +110,12 @@ struct StageProfiler {
                        name, avg, p95, maxv, v.size ());
         };
         ::fprintf (stderr, "[scene-profile] window of %zu callbacks:\n", callbackMs.size ());
+        ::fprintf (stderr,
+                   "  frames capture_submitted=%llu readback_misses=%llu published_shm=%llu published_fallback=%llu\n",
+                   static_cast<unsigned long long> (captureSubmitted),
+                   static_cast<unsigned long long> (readbackMisses),
+                   static_cast<unsigned long long> (publishedShm),
+                   static_cast<unsigned long long> (publishedFallback));
         print ("period", periodMs);
         print ("submit", submitMs);
         print ("wait", waitMs);
@@ -113,6 +127,10 @@ struct StageProfiler {
         ::fflush (stderr);
         periodMs.clear (); submitMs.clear (); waitMs.clear (); copyMs.clear ();
         jpegMs.clear (); b64Ms.clear (); ipcWriteMs.clear (); callbackMs.clear ();
+        captureSubmitted = 0;
+        readbackMisses = 0;
+        publishedShm = 0;
+        publishedFallback = 0;
     }
 };
 
@@ -410,6 +428,9 @@ struct AsyncReadback {
             return false;
         }
         inflight.push_back ({pbo, fence, seq});
+        // In offscreen mode the hidden GLFW swap is skipped, so flush here to
+        // submit the readback and fence without waiting for a backbuffer swap.
+        glFlush ();
         return true;
     }
 
@@ -806,10 +827,13 @@ int main (int argc, char* argv []) {
             lastCapture = now;
             // 1) GPU crop/flip/scale + asynchronous readPixels submit.
             const auto t0 = StageProfiler::Clock::now ();
-            captureFrame (application, width, height, ++submitSeq);
+            const bool captureSubmitted =
+                captureFrame (application, width, height, ++submitSeq);
+            if (captureSubmitted) g_profiler.count (g_profiler.captureSubmitted);
             const auto t1 = StageProfiler::Clock::now ();
             // 2) The oldest readback (one frame old) should already be done.
             if (!g_readback.frontReady ()) {
+                g_profiler.count (g_profiler.readbackMisses);
                 g_profiler.sample (g_profiler.submitMs, t0, t1);
                 g_profiler.sample (g_profiler.waitMs, t1, t1);
                 g_profiler.end (t1);
@@ -826,9 +850,11 @@ int main (int argc, char* argv []) {
             if (copied) {
                 if (useTransport) {
                     g_transport.finishWrite (readSeq);
+                    g_profiler.count (g_profiler.publishedShm);
                     emitJson ("{\"event\":\"frame\",\"shm\":true,\"seq\":"
                               + ::std::to_string (readSeq) + "}");
                 } else {
+                    g_profiler.count (g_profiler.publishedFallback);
                     const auto tj0 = StageProfiler::Clock::now ();
                     const size_t count = static_cast<size_t> (width) * height;
                     fallbackRgb.resize (count * 3);

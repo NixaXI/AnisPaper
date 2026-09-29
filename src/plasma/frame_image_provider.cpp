@@ -3,6 +3,7 @@
 #include "../bridge/frame_bridge.h"
 #include "../bridge/frame_protocol.h"
 
+#include <QDebug>
 #include <QFileInfo>
 #include <QImageReader>
 #include <QPainter>
@@ -46,13 +47,19 @@ QString outputName(const QString &id) {
 }  // namespace
 
 FrameImageProvider::FrameImageProvider()
-    : QQuickImageProvider(QQuickImageProvider::Image) {}
+    : QQuickImageProvider(QQuickImageProvider::Image) {
+  profileClock_.start();
+  profileToggleClock_.start();
+}
 
 QImage FrameImageProvider::requestImage(const QString &id, QSize *size,
                                         const QSize &requestedSize) {
   const QString output = outputName(id).trimmed();
   const quint64 expected = requestedFrameNo(id);
   QMutexLocker locker(&mutex_);
+  updateProfilingState();
+  QElapsedTimer requestClock;
+  if (profilingEnabled_) requestClock.start();
   CachedFrame &cached = cache_[output];
   // FrameWatcher reports a lower sequence when the daemon recreated the
   // bridge.  Drop the old mmap before reading so a new bridge with the same
@@ -103,7 +110,61 @@ QImage FrameImageProvider::requestImage(const QString &id, QSize *size,
   // policy, so handing over native bridge pixels is both cheaper and the only
   // way the aspect ratio stays exact.
   if (size) *size = cached.image.size();
+  if (profilingEnabled_) {
+    recordProfile(output, cached.frameNo, requestClock.nsecsElapsed());
+  }
   return cached.image;
+}
+
+void FrameImageProvider::updateProfilingState() {
+  if (profileToggleClock_.elapsed() < 1000) return;
+  profileToggleClock_.restart();
+  const QString runtime =
+      QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
+  const bool enabled = !runtime.isEmpty() &&
+                       QFileInfo::exists(runtime + QStringLiteral("/anispaper-frame-profile"));
+  if (enabled == profilingEnabled_) return;
+  profilingEnabled_ = enabled;
+  profileCounters_.clear();
+  if (enabled) profileClock_.restart();
+  qInfo().noquote() << "ANISPAPER_PLASMA_PROVIDER_PROFILE"
+                    << (enabled ? "enabled" : "disabled");
+}
+
+void FrameImageProvider::recordProfile(const QString &output,
+                                       quint64 returnedFrameNo,
+                                       qint64 requestNs) {
+  ProfileCounters &counters = profileCounters_[output];
+  const qint64 nowMs = profileClock_.elapsed();
+  if (counters.windowStartMs < 0) counters.windowStartMs = nowMs;
+  ++counters.requests;
+  if (returnedFrameNo != 0 && returnedFrameNo != counters.lastFrameNo) {
+    ++counters.newSequences;
+    counters.lastFrameNo = returnedFrameNo;
+  } else {
+    ++counters.repeatedFrames;
+  }
+  counters.totalRequestNs += requestNs;
+  counters.maxRequestNs = qMax(counters.maxRequestNs, requestNs);
+  const qint64 windowMs = nowMs - counters.windowStartMs;
+  if (windowMs < 5000) return;
+  const double averageMs = counters.requests == 0
+                               ? 0.0
+                               : static_cast<double>(counters.totalRequestNs) /
+                                     static_cast<double>(counters.requests) / 1.0e6;
+  qInfo().noquote()
+      << QStringLiteral("ANISPAPER_PLASMA_PROVIDER_TIMING output=%1 window_ms=%2 requests=%3 new_sequences_returned=%4 repeated_sequences=%5 avg_request_ms=%6 max_request_ms=%7")
+             .arg(output)
+             .arg(windowMs)
+             .arg(counters.requests)
+             .arg(counters.newSequences)
+             .arg(counters.repeatedFrames)
+             .arg(averageMs, 0, 'f', 3)
+             .arg(static_cast<double>(counters.maxRequestNs) / 1.0e6, 0, 'f', 3);
+  const quint64 lastFrameNo = counters.lastFrameNo;
+  counters = ProfileCounters{};
+  counters.lastFrameNo = lastFrameNo;
+  counters.windowStartMs = nowMs;
 }
 
 QImage FrameImageProvider::readFrame(const QString &output, quint64 expectedFrame,

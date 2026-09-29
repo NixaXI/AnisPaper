@@ -13,16 +13,17 @@ wallpaper scene (steamapps/workshop/content/431960/<id>)
         ↓
 wallpaperengine-core (vendored, third_party/linux-wallpaperengine)
         ↓  render OpenGL a ventana GLFW X11 *oculta* (nunca mapped)
-FBO interno del wallpaper (wallpaper->getWallpaperFramebuffer)
-        ↓ glReadPixels + muestreo UV (misma lógica que --screenshot)
-frame RGB 1920x1080
-        ↓ libjpeg (q82) + base64
-protocolo hijo JSON-lines en stdout (igual que video/web)
-        ↓
-IsolatedRenderer (daemon)  →  FrameBridge (SHM /anispaper-<output>)
-        ↓
-org.anispaper.frame (plugin Plasma)  →  QML Image  →  escritorio
+FBO interno del wallpaper
+        ↓ glBlitFramebuffer + readback asíncrono PBO
+triple-buffer POSIX SHM privado del child (RGBA8888)
+        ↓ copia validada al FrameBridge SHM público /anispaper-<output>
+        ↓ watcher Plasma + QML Image + provider con mmap/cache por output
+escritorio
 ```
+
+JPEG/base64/JSON-lines se conserva como fallback de transporte; el camino
+normal de escenas nativas publica los frames por SHM. El FrameBridge es la
+frontera que consume el plugin Plasma.
 
 ## Binarios
 
@@ -51,6 +52,13 @@ inyecta `:0` en el entorno del hijo). La ventana GLFW se crea con
 flotante ni KWin dialog: `xwininfo -root -tree` no muestra ninguna ventana
 del motor.
 
+En modo offscreen, el child captura desde el FBO propio del wallpaper y omite
+el composite, clear y `glfwSwapBuffers()` del backbuffer GLFW oculto de
+640×480. Ese swap no forma parte de la imagen publicada y agregaba una espera
+extra por frame. El fence del PBO se sigue enviando a la cola GL con
+`glFlush()` para que el readback asíncrono avance sin depender del swap oculto.
+La ruta visible upstream conserva su swap habitual.
+
 ## Ciclo de vida y protocolo
 
 - El daemon spawnea al hijo con cwd neutro y `ANISPAPER_SCENE_ENGINE_BIN`
@@ -60,8 +68,9 @@ del motor.
   (sólo para errores reales).
 - Comandos stdin: `{"command":"pause"|"resume"|"stop"}` (mismo protocolo que
   los hijos Qt).
-- Eventos stdout: `ready`, `frame` (JPEG+base64, máx. ~4 MiB/línea) y
-  `fatal`. El daemon decodifica y publica el bridge SHM con el `scaleMode`
+- Eventos stdout: `transport` anuncia el SHM privado, `ready`, `frame` pequeño
+  (notificación de secuencia; JPEG/base64 sólo en fallback) y `fatal`. El
+  daemon valida/copia el frame y publica el bridge SHM con el `scaleMode`
   vigente (`cover→fill`, `fit→fit`, `stretch→stretch`).
 
 ## scaleMode
@@ -83,13 +92,17 @@ física del wl_output; el child manda `--scaling <scaledMode>` al motor
 
 ## Limitaciones conocidas
 
-- **Throughput**: ~21–25 FPS extremo a extremo a 1080p (codificación JPEG +
-  JSON/base64 + SHM). Suficiente para uso actual; mejora futura razonable —
-  transportar frames RGBA/XRGB8888 por un segundo SHM daemon⇄child o DRI
-  dmabuf, sin cortar por ahora el diseño JSON.
+- **Throughput** depende de la escena, GPU y compositor. Las cifras históricas
+  de ~21–25 FPS pertenecen al transporte JPEG/base64 previo; no describen la
+  ruta SHM actual. Ver la medición de hardware y sus límites en
+  [`performance-scene.md`](performance-scene.md).
 - Scenes con sistemas de audio: el child pasa `--silent` (la app ya controla
   el audio por el daemon).
 - Scenes muy GPU-pesados compiten con el escritorio; si el child se queda
   sin renders por CPU, el FPS baja pero el pipeline no se desincroniza.
+- En una RX 6600 con dos monitores 1080p, cap 60 y el swap oculto omitido,
+  AnisPaper midió ~59 FPS publicados por salida con sensor GPU en 27 W. Es una
+  medición de una sesión concreta y anterior a confirmar presentación por KWin;
+  detalles y límites en [`performance-scene.md`](performance-scene.md).
 - Web wallpapers **no** pasan por este motor (stub sin CEF): los dirige el
   WebRenderer Qt existente.

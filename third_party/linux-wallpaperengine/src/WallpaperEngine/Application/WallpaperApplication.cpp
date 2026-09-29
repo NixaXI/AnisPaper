@@ -23,12 +23,16 @@
 #endif /* DEMOMODE */
 
 #include <algorithm>
+#include <chrono>
 #include <climits>
+#include <cstdio>
+#include <cstdlib>
 #include <numeric>
 #include <unistd.h>
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
 #include <thread>
+#include <vector>
 
 #define FULLSCREEN_CHECK_WAIT_TIME 250
 
@@ -855,8 +859,16 @@ void WallpaperApplication::setup () {
 void WallpaperApplication::render () {
     static time_t seconds;
     static struct tm* timeinfo;
+    static const bool anispaperProfile = std::getenv ("ANISPAPER_SCENE_PROFILE") != nullptr;
+    static std::vector<double> anispaperFramePeriodMs, anispaperRenderWorkMs,
+	    anispaperCaptureCallbackMs, anispaperPacerWaitMs, anispaperPacerLateMs;
+    static auto anispaperPreviousFrameStart = std::chrono::steady_clock::time_point {};
     // AnisPaper: pace the COMPLETE offscreen frame, including the capture callback.
     const auto anispaperFrameStart = std::chrono::steady_clock::now ();
+    auto anispaperAfterCapture = anispaperFrameStart;
+    auto anispaperPacerStart = anispaperFrameStart;
+    auto anispaperPacerEnd = anispaperFrameStart;
+    auto anispaperDeadline = anispaperFrameStart;
 
     if (this->m_isPaused) {
 	usleep (FULLSCREEN_CHECK_WAIT_TIME);
@@ -942,19 +954,65 @@ void WallpaperApplication::render () {
     this->updatePlaylists ();
 
     // AnisPaper: offscreen capture hook, after a full frame was dispatched
+    const auto anispaperCaptureStart = std::chrono::steady_clock::now ();
     if (this->m_frameCallback && this->m_context.state.general.keepRunning && !this->m_isPaused) {
 	this->m_frameCallback (*this);
     }
+    anispaperAfterCapture = std::chrono::steady_clock::now ();
+    const auto anispaperCaptureDuration = anispaperAfterCapture - anispaperCaptureStart;
+    const auto anispaperRenderWorkDuration = anispaperCaptureStart - anispaperFrameStart;
 
     if (this->m_context.settings.render.offscreen && !this->m_isPaused
 	&& this->m_context.settings.render.maximumFPS > 0) {
 	const auto period = std::chrono::duration<double> (
 	    1.0 / static_cast<double> (this->m_context.settings.render.maximumFPS));
-	const auto deadline = anispaperFrameStart +
+	anispaperDeadline = anispaperFrameStart +
 	    std::chrono::duration_cast<std::chrono::steady_clock::duration> (period);
-	if (const auto now = std::chrono::steady_clock::now (); now < deadline) {
-	    std::this_thread::sleep_until (deadline);
+	anispaperPacerStart = std::chrono::steady_clock::now ();
+	if (anispaperPacerStart < anispaperDeadline) {
+	    std::this_thread::sleep_until (anispaperDeadline);
 	}
+	anispaperPacerEnd = std::chrono::steady_clock::now ();
+    }
+
+    if (anispaperProfile && this->m_context.settings.render.offscreen && !this->m_isPaused) {
+        const auto ms = [] (std::chrono::steady_clock::duration value) {
+            return std::chrono::duration<double, std::milli> (value).count ();
+        };
+        if (anispaperPreviousFrameStart.time_since_epoch ().count () != 0) {
+            anispaperFramePeriodMs.push_back (ms (anispaperFrameStart - anispaperPreviousFrameStart));
+        }
+        anispaperPreviousFrameStart = anispaperFrameStart;
+        anispaperRenderWorkMs.push_back (ms (anispaperRenderWorkDuration));
+        anispaperCaptureCallbackMs.push_back (ms (anispaperCaptureDuration));
+        anispaperPacerWaitMs.push_back (ms (anispaperPacerEnd - anispaperPacerStart));
+        anispaperPacerLateMs.push_back (std::max (0.0, ms (anispaperPacerEnd - anispaperDeadline)));
+        if (anispaperCaptureCallbackMs.size () >= 120) {
+            const auto print = [] (const char* name, const std::vector<double>& values) {
+                if (values.empty ()) return;
+                auto sorted = values;
+                std::sort (sorted.begin (), sorted.end ());
+                const double average = std::accumulate (sorted.begin (), sorted.end (), 0.0)
+                    / static_cast<double> (sorted.size ());
+                const double p95 = sorted [(sorted.size () - 1) * 95 / 100];
+                std::fprintf (stderr,
+                              "  %-18s avg=%6.2f ms p95=%6.2f ms max=%6.2f ms n=%zu\n",
+                              name, average, p95, sorted.back (), sorted.size ());
+            };
+            std::fprintf (stderr, "[scene-loop-profile] window of %zu frames:\n",
+                          anispaperCaptureCallbackMs.size ());
+            print ("frame period", anispaperFramePeriodMs);
+            print ("render before capture", anispaperRenderWorkMs);
+            print ("capture callback", anispaperCaptureCallbackMs);
+            print ("pacer wait", anispaperPacerWaitMs);
+            print ("pacer wake late", anispaperPacerLateMs);
+            std::fflush (stderr);
+            anispaperFramePeriodMs.clear ();
+            anispaperRenderWorkMs.clear ();
+            anispaperCaptureCallbackMs.clear ();
+            anispaperPacerWaitMs.clear ();
+            anispaperPacerLateMs.clear ();
+        }
     }
 
     if (!this->m_context.settings.screenshot.take || this->m_screenShotTaken == true) {

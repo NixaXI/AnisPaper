@@ -81,6 +81,7 @@ class IsolatedRenderer final : public Renderer {
   bool stopRequested_ = false;
   bool fallback_ = false;
   bool fatalReported_ = false;
+  bool reducedSceneResolution_ = false;
   QString childFailure_;
   QString sceneEnginePath_;
   qint64 childPid_ = 0;

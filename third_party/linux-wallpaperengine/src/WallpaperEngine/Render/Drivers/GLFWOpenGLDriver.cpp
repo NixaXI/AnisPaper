@@ -145,8 +145,12 @@ void GLFWOpenGLDriver::dispatchEventQueue () {
     // TODO: AS THOSE, MORE THAN LIKELY, WILL REQUIRE OF A DIFFERENT PROCESSING RATE
     // update the output with the given image
     this->m_output->updateRender ();
-    // do buffer swapping first
-    glfwSwapBuffers (this->m_window);
+	// AnisPaper reads the wallpaper's own FBO in offscreen mode.  Swapping
+	// this hidden 640x480 default framebuffer has no visual effect and can
+	// introduce an unrelated driver/vblank wait into the scene loop.
+	if (!this->m_context.settings.render.offscreen) {
+	    glfwSwapBuffers (this->m_window);
+	}
     // poll for events
     glfwPollEvents ();
     // increase frame counter

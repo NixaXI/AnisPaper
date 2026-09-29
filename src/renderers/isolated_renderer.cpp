@@ -9,6 +9,7 @@
 #include <QDebug>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -156,6 +157,7 @@ bool IsolatedRenderer::start(QString *error) {
     }
   }
   const bool isScene = spec_.type == QStringLiteral("scene");
+  reducedSceneResolution_ = false;
   if (spec_.type != QStringLiteral("video") && spec_.type != QStringLiteral("web") && !isScene) {
     if (error) {
       *error = QStringLiteral("renderer unavailable");
@@ -193,8 +195,26 @@ bool IsolatedRenderer::start(QString *error) {
   fatalReported_ = false;
   childFailure_.clear();
   input_.clear();
-  const int childWidth = spec_.width;
-  const int childHeight = spec_.height;
+  const QString runtimeDir = qEnvironmentVariable("XDG_RUNTIME_DIR");
+  const QString renderScaleMarker = runtimeDir.isEmpty()
+      ? QString()
+      : runtimeDir + QStringLiteral("/anispaper-scene-render-scale");
+  double sceneRenderScale = 1.0;
+  if (isScene && !renderScaleMarker.isEmpty()) {
+    QFile marker(renderScaleMarker);
+    if (marker.open(QIODevice::ReadOnly)) {
+      bool ok = false;
+      const double requested =
+          QString::fromUtf8(marker.readAll()).trimmed().toDouble(&ok);
+      if (ok && requested >= 0.5 && requested < 1.0) {
+        sceneRenderScale = requested;
+      }
+    }
+  }
+  const int childWidth = qMax(64, qRound(spec_.width * sceneRenderScale));
+  const int childHeight = qMax(64, qRound(spec_.height * sceneRenderScale));
+  reducedSceneResolution_ = isScene &&
+                            (childWidth != spec_.width || childHeight != spec_.height);
   QString program = QCoreApplication::applicationFilePath();
   QStringList args{QStringLiteral("--renderer-child"), QStringLiteral("--type"),
                    spec_.type, QStringLiteral("--file"), spec_.file,
@@ -216,8 +236,8 @@ bool IsolatedRenderer::start(QString *error) {
                                       ? QStringLiteral("stretch")
                                       : QStringLiteral("fill");
     args = QStringList{QStringLiteral("--file"), sceneProjectDir,
-                       QStringLiteral("--width"), QString::number(spec_.width),
-                       QStringLiteral("--height"), QString::number(spec_.height),
+                       QStringLiteral("--width"), QString::number(childWidth),
+                       QStringLiteral("--height"), QString::number(childHeight),
                        QStringLiteral("--fps"), QString::number(spec_.fps),
                        QStringLiteral("--volume"),
                        QString::number(qBound(0, qRound(spec_.volume * 128.0), 128)),
@@ -289,6 +309,22 @@ bool IsolatedRenderer::start(QString *error) {
     // Fullscreen geometry is not evidence of a game.  The daemon's
     // evidence-based Gaming Mode owns pause/resume for all renderer types.
     env.insert(QStringLiteral("ANISPAPER_SCENE_NO_FULLSCREEN_PAUSE"), QStringLiteral("1"));
+    const QString actualRuntime = env.value(QStringLiteral("XDG_RUNTIME_DIR"));
+    if (!actualRuntime.isEmpty() &&
+        QFileInfo::exists(actualRuntime + QStringLiteral("/anispaper-scene-profile"))) {
+      env.insert(QStringLiteral("ANISPAPER_SCENE_PROFILE"), QStringLiteral("1"));
+    } else {
+      env.remove(QStringLiteral("ANISPAPER_SCENE_PROFILE"));
+    }
+    if (reducedSceneResolution_) {
+      qInfo().noquote() << "ANISPAPER_SCENE_RENDER_SCALE"
+                        << "output=" + spec_.output
+                        << "scale=" + QString::number(sceneRenderScale, 'f', 2)
+                        << "render=" + QString::number(childWidth) + "x" +
+                               QString::number(childHeight)
+                        << "display_mode=" + QString::number(spec_.width) + "x" +
+                               QString::number(spec_.height);
+    }
   }
   // Use a dedicated Pulse/PipeWire client name so stream-restore does not
   // reuse an old "mpv muted at 0%" session from a previous wallpaper.
@@ -501,7 +537,7 @@ void IsolatedRenderer::parseLine(const QByteArray &line) {
     } else if (!copySceneTransportFrame()) {
       return;
     }
-    if (!directPublished &&
+    if (!directPublished && !reducedSceneResolution_ &&
         (frame_.width() != spec_.width || frame_.height() != spec_.height) &&
         spec_.width >= 64 && spec_.height >= 64) {
       const QImage scaled = frame_.scaled(QSize(spec_.width, spec_.height),
