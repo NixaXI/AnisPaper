@@ -255,6 +255,8 @@ if(BUILD_TESTING)
   add_test(NAME plasma_output_map_env_contract
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/plasma_output_map_env_contract.py
               ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME session_wrapper
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/session_wrapper_test.py)
   add_executable(anispaper-plasma-login-manager-test
       tests/plasma_login_manager_test.cpp
       src/daemon/plasma_login_manager.h
@@ -319,10 +321,32 @@ if(BUILD_TESTING)
       src/common/wayland_monitor.cpp)
   target_compile_features(anispaper-isolated-renderer-cleanup-test PRIVATE cxx_std_20)
   target_link_libraries(anispaper-isolated-renderer-cleanup-test PRIVATE
-      anispaper-bridge Qt6::Core Qt6::Gui PkgConfig::WAYLAND_CLIENT PkgConfig::XRANDR PkgConfig::X11)
+      anispaper-bridge Qt6::Core Qt6::Gui Qt6::DBus PkgConfig::WAYLAND_CLIENT PkgConfig::XRANDR PkgConfig::X11)
   target_compile_definitions(anispaper-isolated-renderer-cleanup-test PRIVATE
       ANISPAPER_ISOLATED_RENDERER_TESTING=1)
   target_compile_options(anispaper-isolated-renderer-cleanup-test PRIVATE -Wall -Wextra -Wpedantic)
+  add_executable(anispaper-scene-session-recovery-test
+      tests/scene_session_recovery_test.cpp
+      src/renderers/renderer.h
+      src/renderers/isolated_renderer.h src/renderers/isolated_renderer.cpp
+      src/renderers/renderer_manager.h src/renderers/renderer_manager.cpp
+      src/renderers/scene_renderer.h src/renderers/scene_renderer.cpp
+      src/renderers/static_image_renderer.h src/renderers/static_image_renderer.cpp
+      src/common/wayland_monitor.h src/common/wayland_monitor.cpp)
+  target_compile_features(anispaper-scene-session-recovery-test PRIVATE cxx_std_20)
+  target_link_libraries(anispaper-scene-session-recovery-test PRIVATE
+      anispaper-bridge Qt6::Core Qt6::Gui Qt6::DBus PkgConfig::WAYLAND_CLIENT PkgConfig::XRANDR PkgConfig::X11)
+  find_program(ANISPAPER_DBUS_RUN_SESSION dbus-run-session)
+  if(ANISPAPER_DBUS_RUN_SESSION)
+    if(ANISPAPER_ELF_LOADER)
+      add_test(NAME scene_session_recovery COMMAND ${ANISPAPER_DBUS_RUN_SESSION} --
+          ${ANISPAPER_ELF_LOADER} $<TARGET_FILE:anispaper-scene-session-recovery-test>)
+    else()
+      add_test(NAME scene_session_recovery COMMAND ${ANISPAPER_DBUS_RUN_SESSION} --
+          $<TARGET_FILE:anispaper-scene-session-recovery-test>)
+    endif()
+    set_tests_properties(scene_session_recovery PROPERTIES TIMEOUT 60)
+  endif()
   if(ANISPAPER_ELF_LOADER)
     add_test(NAME isolated_renderer_cleanup
         COMMAND ${ANISPAPER_ELF_LOADER} $<TARGET_FILE:anispaper-isolated-renderer-cleanup-test>)

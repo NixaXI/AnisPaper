@@ -45,8 +45,14 @@ combinado/bloom). Resolución automática:
 Si no se encuentra → `fatal` del child → fallback `SceneRenderer`
 (static) vía watchdog existente.
 
-El contexto GL es GLX/X11 sobre XWayland (`DISPLAY`; si falta, el daemon
-inyecta `:0` en el entorno del hijo). La ventana GLFW se crea con
+El contexto GL es GLX/X11 sobre XWayland. El child usa el `DISPLAY` de la sesión;
+el daemon no inventa `:0`. Si el servicio arrancó antes de la importación del
+entorno gráfico, consulta `Environment` del manager systemd de usuario por
+D-Bus, valida runtime/sesión y recupera `DISPLAY`/`XAUTHORITY`. Mientras falte
+`DISPLAY`, el estado es `waiting-session`: reintenta cada 5 s conservando el
+bridge y sin consumir la cuota de crashes. Una sesión sin XWayland puede seguir
+usando video; las escenas nativas esperan un servidor X real.
+La ventana GLFW se crea con
 `GLFW_VISIBLE FALSE` y **nunca** se invoca `showWindow()` (parche
 `settings.render.offscreen` de AnisPaper sobre upstream). No hay ventana
 flotante ni KWin dialog: `xwininfo -root -tree` no muestra ninguna ventana

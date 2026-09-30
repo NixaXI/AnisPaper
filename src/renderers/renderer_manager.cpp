@@ -548,6 +548,7 @@ void RendererManager::createRenderer(Entry *entry, bool staticFallback) {
   }
   entry->renderer = renderer;
   entry->rendererReady = false;
+  entry->occluded = false;
   if (auto *isolated = qobject_cast<IsolatedRenderer *>(renderer)) {
     isolated->setSceneTransportCallbacks(
         [this, entry](const SceneTransportView &source, quint64 *lastSceneFrame) {
@@ -596,11 +597,22 @@ void RendererManager::createRenderer(Entry *entry, bool staticFallback) {
           });
   QString error;
   if (!renderer->start(&error)) {
+    if (renderer->waitingForSession()) {
+      if (entry->lastError != error) {
+        qInfo().noquote() << "anispaper scene deferred" << entry->output << error;
+      }
+      entry->lastError = error;
+      entry->restartTimer->start(5000);
+      return;
+    }
     QTimer::singleShot(0, this, [this, entry, error] {
       handleFailure(entry, error.isEmpty() ? QStringLiteral("renderer start failed")
                                             : error);
     });
     return;
+  }
+  if (entry->lastError == QStringLiteral("waiting for the graphical session DISPLAY")) {
+    entry->lastError.clear();
   }
   // Pause a freshly created renderer only when ITS output is the occluded one:
   // gamingActive_ is now a session-wide summary, and a game or fullscreen
@@ -741,7 +753,9 @@ QJsonObject RendererManager::eventFor(const Entry *entry) const {
                             ? QStringLiteral("safe-mode")
                             : (!entry->renderer
                                    ? QStringLiteral("restarting")
-                                   : (entry->renderer->isRunning()
+                                   : (entry->renderer->waitingForSession()
+                                          ? QStringLiteral("waiting-session")
+                                          : entry->renderer->isRunning()
                                           ? QStringLiteral("running")
                                           : QStringLiteral("starting")));
   QJsonObject event{{QStringLiteral("id"), entry->spec.id},

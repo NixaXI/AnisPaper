@@ -26,6 +26,29 @@ Updated for v0.2.0. This is the honest list — check here before filing a bug.
 
 ## Dev notes (chronological, Spanish/English mixed)
 
+## 2026-09-30 — escena estática tras login temprano (corregido)
+
+Al volver de SMITE 2, Gaming Mode ya estaba desactivado pero HDMI-A-1 seguía
+en fallback estático con tres fallos: `scene renderer requires the current
+session DISPLAY`. El journal mostraba que el wrapper había ejecutado el daemon
+durante el login sin `DISPLAY`, y el proceso conservó ese entorno incompleto.
+Importar el entorno gráfico y reiniciar el servicio recuperó las dos salidas,
+con los mismos wallpapers, 1920×1080 y cero crashes.
+
+El wrapper ahora espera brevemente la importación de variables de la misma
+sesión. El adaptador Scene también consulta el entorno actualizado por D-Bus
+para importaciones posteriores, sin reemplazar un display explícito ni aceptar
+otra sesión. La ausencia de `DISPLAY` se reintenta como `waiting-session`, sin
+convertirse en safe mode. Los crashes reales conservan su cuota 1/3/9 s.
+Boot restore deja pendiente una salida sin tamaño físico anunciado. Esto no
+detecta un modo temporal válido, como 640×480, que cambie después del arranque.
+
+Regresión: bus privado con manager ficticio, demora de más de 20 s, rechazo de
+otra sesión, display distinto de `:0`, cookie con espacios, recuperación y tres
+crashes reales; wrapper probado con importación tardía, Wayland sin XWayland,
+X11 con un socket Wayland viejo y sockets ambiguos. El reinicio completo de la
+PC debe comprobarse en el próximo login normal.
+
 ## F4 — 2026-08-09 (resuelto en F8)
 
 - **Issue**: `libwallpaperengine` no está instalada en esta sesión (`pkg-config

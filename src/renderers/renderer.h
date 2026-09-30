@@ -48,6 +48,9 @@ class Renderer : public QObject {
   virtual QString rendererName() const = 0;
   virtual bool isRunning() const = 0;
   virtual bool isFallback() const { return false; }
+  // A graphical login still importing its environment is a prerequisite wait,
+  // not a renderer crash. The owner can retry without spending crash quota.
+  virtual bool waitingForSession() const { return false; }
   virtual qint64 processId() const { return 0; }
   virtual double frameRate() const { return 0.0; }
   // Live master mix from settings.fpsCap / settings.defaultVolume.  Isolated

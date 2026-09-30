@@ -6,6 +6,10 @@
 
 #include <QBuffer>
 #include <QCoreApplication>
+#include <QDBusConnection>
+#include <QDBusArgument>
+#include <QDBusMessage>
+#include <QDBusVariant>
 #include <QDebug>
 #include <QDir>
 #include <QElapsedTimer>
@@ -33,6 +37,44 @@
 
 namespace {
 constexpr qsizetype kMaxWorkerLine = 4 * 1024 * 1024;
+
+void refreshSceneSessionEnvironment(QProcessEnvironment &environment) {
+  const QString display = environment.value(QStringLiteral("DISPLAY")).trimmed();
+  const QFileInfo auth(environment.value(QStringLiteral("XAUTHORITY")));
+  const bool usableAuth = auth.isFile() && auth.isReadable() && !auth.isSymLink() &&
+                          auth.ownerId() == geteuid();
+  if (!display.isEmpty() && usableAuth) return;
+  // The daemon may have started before Plasma imported DISPLAY into systemd.
+  // Read the typed property, never evaluate shell assignments. Preserve a
+  // direct launch's display, and reject a different graphical login.
+  QDBusMessage request = QDBusMessage::createMethodCall(
+      QStringLiteral("org.freedesktop.systemd1"),
+      QStringLiteral("/org/freedesktop/systemd1"),
+      QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"));
+  request << QStringLiteral("org.freedesktop.systemd1.Manager")
+          << QStringLiteral("Environment");
+  const auto reply = QDBusConnection::sessionBus().call(request, QDBus::Block, 500);
+  if (reply.type() != QDBusMessage::ReplyMessage || reply.arguments().size() != 1) return;
+  const QStringList assignments = qdbus_cast<QStringList>(
+      qvariant_cast<QDBusVariant>(reply.arguments().constFirst()).variant());
+  QProcessEnvironment manager;
+  for (const QString &assignment : assignments) {
+    const qsizetype separator = assignment.indexOf(QLatin1Char('='));
+    if (separator > 0) manager.insert(assignment.left(separator), assignment.mid(separator + 1));
+  }
+  const QString runtime = environment.value(QStringLiteral("XDG_RUNTIME_DIR"));
+  if (runtime.isEmpty() || manager.value(QStringLiteral("XDG_RUNTIME_DIR")) != runtime) return;
+  const QString sessionType = environment.value(QStringLiteral("ANISPAPER_SESSION_TYPE"),
+                                                environment.value(QStringLiteral("XDG_SESSION_TYPE")));
+  for (const QString &key : {QStringLiteral("XDG_SESSION_ID"), QStringLiteral("WAYLAND_DISPLAY")}) {
+    if (!environment.value(key).isEmpty() && environment.value(key) != manager.value(key)) return;
+  }
+  if (!sessionType.isEmpty() && sessionType != manager.value(QStringLiteral("XDG_SESSION_TYPE"))) return;
+  if (manager.value(QStringLiteral("DISPLAY")).trimmed().isEmpty()) return;
+  if (!display.isEmpty() && display != manager.value(QStringLiteral("DISPLAY"))) return;
+  if (display.isEmpty()) environment.insert(QStringLiteral("DISPLAY"), manager.value(QStringLiteral("DISPLAY")));
+  if (!usableAuth) environment.insert(QStringLiteral("XAUTHORITY"), manager.value(QStringLiteral("XAUTHORITY")));
+}
 
 // ANISPAPER_PROFILE=1 enables parent-side frame pipeline profiling: parse,
 // base64 decode and JPEG decode costs (JPEG workers) or the shm copy cost
@@ -136,6 +178,7 @@ IsolatedRenderer::IsolatedRenderer(RendererSpec spec, QObject *parent)
 IsolatedRenderer::~IsolatedRenderer() { stop(); }
 
 bool IsolatedRenderer::start(QString *error) {
+  waitingForSession_ = false;
   if (running_) {
     return true;
   }
@@ -284,7 +327,10 @@ bool IsolatedRenderer::start(QString *error) {
     // resolve a relative WAYLAND_DISPLAY name.
     env.insert(QStringLiteral("XDG_RUNTIME_DIR"), forcedRuntime);
   }
-  if (!env.contains(QStringLiteral("WAYLAND_DISPLAY"))) {
+  const QString selectedSession = env.value(QStringLiteral("ANISPAPER_SESSION_TYPE"),
+                                            env.value(QStringLiteral("XDG_SESSION_TYPE")));
+  if (selectedSession != QStringLiteral("x11") &&
+      !env.contains(QStringLiteral("WAYLAND_DISPLAY"))) {
     const QString runtime = env.value(QStringLiteral("XDG_RUNTIME_DIR"));
     const QStringList sockets = QDir(runtime).entryList(
         {QStringLiteral("wayland-*")}, QDir::System | QDir::NoDotAndDotDot,
@@ -305,6 +351,7 @@ bool IsolatedRenderer::start(QString *error) {
   // itself is a Wayland service; otherwise pause-on-fullscreen cannot observe
   // the game window reliably.
   if (isScene) {
+    refreshSceneSessionEnvironment(env);
     env.insert(QStringLiteral("XDG_SESSION_TYPE"), QStringLiteral("x11"));
     // Fullscreen geometry is not evidence of a game.  The daemon's
     // evidence-based Gaming Mode owns pause/resume for all renderer types.
@@ -335,7 +382,8 @@ bool IsolatedRenderer::start(QString *error) {
   // in a Wayland session). A guessed :0 can target a different server or fail
   // authorization, so require the display exported by this desktop session.
   if (isScene && env.value(QStringLiteral("DISPLAY")).trimmed().isEmpty()) {
-    if (error) *error = QStringLiteral("scene renderer requires the current session DISPLAY");
+    waitingForSession_ = true;
+    if (error) *error = QStringLiteral("waiting for the graphical session DISPLAY");
     return false;
   }
   // A user service can start before the graphical session exports XAUTHORITY

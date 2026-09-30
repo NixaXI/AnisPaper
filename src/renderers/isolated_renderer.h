@@ -27,6 +27,7 @@ class IsolatedRenderer final : public Renderer {
   QString rendererName() const override;
   bool isRunning() const override;
   bool isFallback() const override;
+  bool waitingForSession() const override { return waitingForSession_; }
   qint64 processId() const override;
   double frameRate() const override;
   void applyPlayback(int fps, double volume) override;
@@ -82,6 +83,7 @@ class IsolatedRenderer final : public Renderer {
   bool fallback_ = false;
   bool fatalReported_ = false;
   bool reducedSceneResolution_ = false;
+  bool waitingForSession_ = false;
   QString childFailure_;
   QString sceneEnginePath_;
   qint64 childPid_ = 0;

@@ -912,6 +912,22 @@ class Daemon : public QObject {
       // Si el usuario ya aplicó algo durante el login, no lo pisamos.
       if (!renderers_->wallpaperId(output).isEmpty()) continue;
 
+      // A connector can be announced before its CURRENT physical mode arrives.
+      // Keep the assignment pending instead of launching a permanent VGA child.
+      QJsonObject physicalMode;
+      for (const QJsonValue &value : outputs) {
+        const QJsonObject monitor = value.toObject();
+        if (monitor.value(QStringLiteral("name")).toString() == output) {
+          physicalMode = monitor.value(QStringLiteral("physicalSize")).toObject();
+          break;
+        }
+      }
+      if (physicalMode.value(QStringLiteral("width")).toInt() <= 0 ||
+          physicalMode.value(QStringLiteral("height")).toInt() <= 0) {
+        ++pending;
+        continue;
+      }
+
       const QJsonObject item = catalogItem(wallpaperId);
       if (item.isEmpty()) {
         ++pending;

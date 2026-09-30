@@ -17,6 +17,50 @@ if [[ -n "${XDG_SESSION_ID:-}" ]]; then
   fi
 fi
 
+# User units can start before Plasma imports the graphical environment. The
+# environment inherited by exec never changes, so briefly refresh missing keys.
+# Late DISPLAY imports are also handled by the scene adapter after this grace.
+refresh_manager_environment() {
+  local key value
+  local -A manager=()
+  while IFS='=' read -r key value; do
+    case "$key" in
+      DISPLAY|WAYLAND_DISPLAY|XAUTHORITY|XDG_RUNTIME_DIR|XDG_SESSION_TYPE|XDG_SESSION_ID)
+        # show-environment shell-quotes unusual values. Never eval/source it;
+        # leave those values to the scene adapter's typed D-Bus lookup.
+        [[ "$value" =~ ^[a-zA-Z0-9_@./:+-]+$ ]] && manager["$key"]="$value"
+        ;;
+    esac
+  done < <(timeout 1s systemctl --user show-environment 2>/dev/null || true)
+  [[ "${manager[XDG_RUNTIME_DIR]:-}" == "$runtime" ]] || return 0
+  [[ -z "$session" || "${manager[XDG_SESSION_TYPE]:-}" == "$session" ]] || return 0
+  [[ -z "${XDG_SESSION_ID:-}" || "${manager[XDG_SESSION_ID]:-}" == "$XDG_SESSION_ID" ]] || return 0
+  [[ -z "${WAYLAND_DISPLAY:-}" || "${manager[WAYLAND_DISPLAY]:-}" == "$WAYLAND_DISPLAY" ]] || return 0
+  if [[ -z "$session" ]]; then
+    session="${manager[XDG_SESSION_TYPE]:-}"
+  fi
+  if [[ -z "${WAYLAND_DISPLAY:-}" && "$session" == wayland ]]; then
+    export WAYLAND_DISPLAY="${manager[WAYLAND_DISPLAY]:-}"
+  fi
+  if [[ -z "${DISPLAY:-}" ]]; then
+    export DISPLAY="${manager[DISPLAY]:-}"
+  fi
+  if [[ "${manager[DISPLAY]:-}" == "${DISPLAY:-}" &&
+        ( -z "${XAUTHORITY:-}" || ! -r "$XAUTHORITY" ) &&
+        -r "${manager[XAUTHORITY]:-}" ]]; then
+    export XAUTHORITY="${manager[XAUTHORITY]}"
+  fi
+}
+
+for attempt in {1..10}; do
+  refresh_manager_environment
+  if [[ -n "${DISPLAY:-}" &&
+        ( "$session" != wayland || -S "$runtime/${WAYLAND_DISPLAY:-}" ) ]]; then
+    break
+  fi
+  ((attempt < 10)) && sleep 1
+done
+
 case "$session" in
   x11)
     unset WAYLAND_DISPLAY || true
