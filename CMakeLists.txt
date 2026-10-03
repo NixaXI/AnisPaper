@@ -47,7 +47,7 @@ target_include_directories(anispaper-layer-shell-probe PRIVATE ${PROBE_GENERATED
 target_link_libraries(anispaper-layer-shell-probe PRIVATE PkgConfig::WAYLAND_CLIENT)
 target_compile_options(anispaper-layer-shell-probe PRIVATE -Wall -Wextra -Wpedantic)
 
-find_package(Qt6 6.2 REQUIRED COMPONENTS Core Network Gui OpenGL Widgets WebEngineCore WebEngineWidgets WebChannel Quick Qml QuickControls2 DBus)
+find_package(Qt6 6.2 REQUIRED COMPONENTS Core Network Gui OpenGL Widgets WebEngineCore WebEngineWidgets WebEngineQuick WebChannel Quick Qml QuickControls2 DBus)
 find_package(KF6Auth 6.0 QUIET)
 pkg_check_modules(MPV REQUIRED IMPORTED_TARGET mpv)
 pkg_check_modules(JPEG REQUIRED IMPORTED_TARGET libjpeg)
@@ -130,6 +130,9 @@ target_link_libraries(anis-paperd PRIVATE
     Qt6::OpenGL
     Qt6::Widgets
     Qt6::WebEngineCore
+    Qt6::WebEngineQuick
+    Qt6::Quick
+    Qt6::Qml
     Qt6::WebEngineWidgets
     Qt6::WebChannel
     anispaper-bridge

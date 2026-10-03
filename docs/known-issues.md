@@ -26,6 +26,34 @@ Updated for v0.2.0. This is the honest list — check here before filing a bug.
 
 ## Dev notes (chronological, Spanish/English mixed)
 
+## 2026-10-02 — web: render offscreen con QQuickRenderControl (pendiente validar en escritorio)
+
+`WebRenderer` deja `QWebEngineView` + `QWidget::grab()`/`toDataURL`. La página
+vive en un `WebEngineView` de QtWebEngineQuick dentro de un `QQuickWindow`
+offscreen gobernado por `QQuickRenderControl`; Chromium compone en nuestro FBO
+y se lee con `glReadPixels` (target espejado, sin flip en CPU). Sandbox
+intacto: interceptor de URLs, perfil off-the-record, permisos denegados,
+descargas canceladas.
+
+- Barrido de los 13 web locales vía el hijo real (`--renderer-child --type
+  web`, 1080p, SHM): 11 animados a su ritmo nativo (Nikke/Live2D/Spine ~60 fps,
+  Miku nieve 40 = su `setInterval` de 25 ms, Ruby Rose 24 = su vídeo). Blue
+  Archive muestra el preview ~7 s mientras carga atlas 8K y luego va a 60 fps.
+  Natsuki (parallax de ratón) queda estático sin input; Module Visualizer
+  queda negro sin `wallpaperRegisterAudioListener`.
+- Coste por frame publicado: render ~1 ms, readback ~4 ms, emit/SHM ~2.4 ms.
+  Nikke a 60 fps ≈ 100 % de un núcleo sumando los procesos de Chromium.
+  Siguiente paso: readback asíncrono (PBO) y escribir directo en el slot SHM.
+- Trampas encontradas: (1) Qt WebEngine marca el ritmo de los begin-frames de
+  Chromium y le hace llegar el tamaño de la vista a través de los frames de
+  Quick que dibujamos, así que hay que dibujar en cada tick, incluso antes de
+  `load`; si no, la página parsea con viewport 0×0 (Miku) o la carga de Spine
+  se queda bloqueada (Blue Archive). (2) `sceneChanged`/`renderRequested` no
+  llegan de forma fiable en cada textura nueva → se dedupe por hash de filas.
+  (3) La carga real espera en `about:blank` hasta que `innerWidth*innerHeight
+  > 0`. (4) `applyUserProperties` se entrega también tras `load` (páginas que
+  montan la escena en `<body onload>`).
+
 ## 2026-09-30 — escena estática tras login temprano (corregido)
 
 Al volver de SMITE 2, Gaming Mode ya estaba desactivado pero HDMI-A-1 seguía

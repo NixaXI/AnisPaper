@@ -35,7 +35,8 @@ jobs:
             libxxf86vm-dev \
             ffmpeg xvfb mesa-utils libgl1-mesa-dri \
             qml6-module-qtqml qml6-module-qtqml-workerscript \
-            qml6-module-qtquick qml6-module-qtquick-window
+            qml6-module-qtquick qml6-module-qtquick-window \
+            qml6-module-qtwebengine
 
       - name: Configure
         run: |
