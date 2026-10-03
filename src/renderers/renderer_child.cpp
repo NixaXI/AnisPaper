@@ -290,15 +290,14 @@ int runRendererChild(int argc, char **argv) {
     qputenv("QT_AUTO_SCREEN_SCALE_FACTOR", "0");
     qputenv("QT_SCALE_FACTOR", "1");
     // Run the web child on XWayland (QT_QPA_PLATFORM=xcb) when an X display
-    // is available.  Measured on AMD RX 6600 @1080p, web Nikke Spine:
-    //   wayland QPA: compositor DSF 2 (3840x2160 grab + 19 ms downscale),
-    //     page rAF ~18 Hz, output ~18 fps, grab ~30 ms
-    //   xcb QPA:     native 1080p grab, page rAF 60 Hz, output ~32 fps,
-    //     grab ~6 ms, real GL 4.6 context.
-    // Scoped to web only: the video child needs the Wayland QPA for the
-    // mpv VAAPI zero-copy path (MPV_RENDER_PARAM_WL_DISPLAY).  Gated on
-    // DISPLAY so X-less sessions keep the Wayland path; ANISPAPER_WEB_QPA
-    // overrides for tests ("wayland"/"xcb").
+    // is available.  This dates from the QWidget::grab() capture (wayland QPA
+    // grabbed at DSF 2 and ~18 fps); the offscreen QQuickRenderControl path
+    // measured the same ~55-60 fps on both, so xcb is kept only as the known
+    // working default.  Scoped to web only: the video child needs the
+    // Wayland QPA for the mpv VAAPI zero-copy path
+    // (MPV_RENDER_PARAM_WL_DISPLAY).  Gated on DISPLAY so X-less sessions keep
+    // the Wayland path; ANISPAPER_WEB_QPA overrides for tests
+    // ("wayland"/"xcb").
     const QByteArray qpaOverride =
         qgetenv("ANISPAPER_WEB_QPA").trimmed().toLower();
     if (qpaOverride == "xcb" ||
@@ -342,8 +341,10 @@ int runRendererChild(int argc, char **argv) {
     if (!flags.isEmpty()) flags += ' ';
     flags += extra;
     // Tests may set --disable-gpu; do not force it.  WebGL wallpapers need a
-    // real (or SwiftShader) GL context, and frames are read back from canvas.
+    // real (or SwiftShader) GL context, and frames are read back from the
+    // offscreen Qt Quick target.
     qputenv("QTWEBENGINE_CHROMIUM_FLAGS", flags);
+    WebRenderer::prepareProcess();
   }
   QApplication app(argc, argv);
   QCommandLineParser parser;

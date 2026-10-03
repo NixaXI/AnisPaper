@@ -31,8 +31,8 @@ require('"--silent"' not in SCENE,
         "scene child still passes the upstream --silent flag")
 require('"--volume"' in ISOLATED,
         "scene child does not propagate the renderer volume")
-require('PlaybackRequiresUserGesture' in WEB and
-        'setAudioMuted' in WEB,
+require('playbackRequiresUserGesture: false' in WEB and
+        'audioMuted: root.muted' in WEB,
         "web renderer does not explicitly enable audible autoplay")
 require('int fpsCap=60' in DAEMON,
         "daemon default FPS cap remains 30")

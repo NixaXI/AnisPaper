@@ -8,31 +8,27 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QImageReader>
-#include <QJsonDocument>
+#include <QOffscreenSurface>
+#include <QOpenGLContext>
+#include <QOpenGLExtraFunctions>
+#include <QOpenGLFramebufferObject>
 #include <QPainter>
-#include <QPointer>
-#include <QPixmap>
+#include <QQmlComponent>
+#include <QQmlEngine>
+#include <QQuickGraphicsDevice>
+#include <QQuickItem>
+#include <QQuickRenderControl>
+#include <QQuickRenderTarget>
+#include <QQuickWindow>
 #include <QTextStream>
-#include <QtGlobal>
-
-#include <memory>
 #include <QUrl>
-#include <QWebChannel>
-#include <QWebEngineDownloadRequest>
-#if QT_VERSION >= QT_VERSION_CHECK(6, 2, 0)
-#include <QWebEngineNewWindowRequest>
-#endif
-#include <QWebEnginePage>
-#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
-#include <QWebEnginePermission>
-#endif
-#include <QWebEngineProfile>
-#include <QWebEngineScript>
-#include <QWebEngineScriptCollection>
-#include <QWebEngineSettings>
+#include <QVariantList>
+#include <QVariantMap>
 #include <QWebEngineUrlRequestInfo>
 #include <QWebEngineUrlRequestInterceptor>
-#include <QWebEngineView>
+#include <QtGlobal>
+#include <QtWebEngineQuick/QQuickWebEngineProfile>
+#include <QtWebEngineQuick/qtwebenginequickglobal.h>
 
 namespace {
 
@@ -98,31 +94,6 @@ class SandboxInterceptor final : public QWebEngineUrlRequestInterceptor {
   QString rootPrefix_;
 };
 
-// QWebEnginePage that mirrors page console output to a file when
-// ANISPAPER_WEB_CONSOLE=1.  Spina/boot failures otherwise die silently (the
-// child process swallows stderr), leaving only a black canvas behind.
-class LoggingPage final : public QWebEnginePage {
- public:
-  using QWebEnginePage::QWebEnginePage;
-
- protected:
-  void javaScriptConsoleMessage(JavaScriptConsoleMessageLevel level,
-                                const QString &message, int lineNumber,
-                                const QString &sourceID) override {
-    if (qEnvironmentVariableIsSet("ANISPAPER_WEB_CONSOLE")) {
-      QFile log(webConsoleLogPath());
-      if (log.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
-        QTextStream out(&log);
-        out << "[web-console] level=" << static_cast<int>(level)
-            << " line=" << lineNumber << " src=" << sourceID << " msg="
-            << message.left(512) << "\n";
-      }
-    }
-    QWebEnginePage::javaScriptConsoleMessage(level, message, lineNumber,
-                                             sourceID);
-  }
-};
-
 bool imageHasContent(const QImage &image) {
   if (image.isNull() || image.width() < 2 || image.height() < 2) return false;
   const int stepX = qMax(1, image.width() / 12);
@@ -142,6 +113,20 @@ bool imageHasContent(const QImage &image) {
   return samples > 0 && lit * 10 > samples;
 }
 
+// Hash of every other full row, a word at a time (~1 ms at 1080p).  Sparse
+// grids missed small sprites such as snow particles and froze the publish.
+quint64 frameHash(const QImage &image) {
+  quint64 h = 1469598103934665603ULL;
+  const int words = image.width() * 4 / 8;
+  for (int y = 0; y < image.height(); y += 2) {
+    const auto *row = reinterpret_cast<const quint64 *>(image.constScanLine(y));
+    for (int x = 0; x < words; ++x) {
+      h = (h ^ row[x]) * 1099511628211ULL;
+    }
+  }
+  return h;
+}
+
 QImage coverExact(const QImage &source, int width, int height) {
   if (source.isNull() || width < 2 || height < 2) return {};
   QImage result(width, height, QImage::Format_RGBA8888);
@@ -156,264 +141,172 @@ QImage coverExact(const QImage &source, int width, int height) {
   return result;
 }
 
-QImage decodeDataUrl(const QString &dataUrl) {
-  const int comma = dataUrl.indexOf(QLatin1Char(','));
-  if (comma < 0 || !dataUrl.startsWith(QLatin1String("data:image/"))) return {};
-  const QByteArray raw =
-      QByteArray::fromBase64(dataUrl.mid(comma + 1).toLatin1());
-  if (raw.isEmpty()) return {};
-  QImage image;
-  if (!image.loadFromData(raw)) return {};
-  return image.convertToFormat(QImage::Format_RGBA8888);
-}
-
+// Runs before any page script.  The page is composited at CSS pixels, so pin
+// devicePixelRatio to 1 (Spine sizes its canvas by it and would otherwise
+// burn 4x raster on a DPR-2 session), and provide the Wallpaper Engine rAF
+// shims plus a pause flag the renderer toggles.
 const char kBootstrapScript[] = R"JS(
 (function(){
-  // The hidden child runs at Wayland DPR 2 while the wallpaper is displayed
-  // at CSS pixels: wallpaper libs (Spine) size their canvas by
-  // window.devicePixelRatio, burning 4x raster for pixels that are
-  // downscaled away.  Pin it to 1 before any page script runs.
   try{ Object.defineProperty(window, 'devicePixelRatio', {value: 1}); }catch(e){}
-  function wrap(proto){
-    if(!proto || proto.__anispaperWrapped) return;
-    const orig = proto.getContext;
-    if(typeof orig !== 'function') return;
-    proto.getContext = function(type, attrs){
-      const t = String(type || '').toLowerCase();
-      if(t.indexOf('webgl') >= 0){
-        attrs = Object.assign({}, attrs || {}, {preserveDrawingBuffer: true});
-      }
-      return orig.call(this, type, attrs);
-    };
-    proto.__anispaperWrapped = true;
-  }
-  wrap(window.HTMLCanvasElement && HTMLCanvasElement.prototype);
-  try{ wrap(window.OffscreenCanvas && OffscreenCanvas.prototype); }catch(e){}
-  function fixBg(){
-    try{
-      if(!document.body) return;
-      // Never override the author's own background (e.g. Spine wallpapers
-      // ship `background: url(background.png)` in style.css).  Only supply
-      // the conventional fallback when the page has no background at all;
-      // image/bg.png does not even exist in most projects and forcing it
-      // produced a black page with a 404 behind the canvas.
-      const cur = getComputedStyle(document.body).backgroundImage || '';
-      if(cur && cur !== 'none') return;
-      const img = new Image();
-      img.onload = function(){
-        const now = getComputedStyle(document.body).backgroundImage || '';
-        if(now && now !== 'none') return;
-        document.body.style.backgroundImage = 'url('+img.src+')';
-        document.body.style.backgroundSize = 'cover';
-        document.body.style.backgroundPosition = 'center';
-        document.body.style.backgroundRepeat = 'no-repeat';
-      };
-      img.src = 'image/bg.png';
-    }catch(e){}
-  }
-  if(document.readyState === 'loading'){
-    document.addEventListener('DOMContentLoaded', fixBg);
-  } else {
-    fixBg();
-  }
+  window.__anispaperPaused = false;
   window.wallpaperRequestAnimationFrame = window.wallpaperRequestAnimationFrame
       || function(cb){ return window.requestAnimationFrame(cb); };
   window.wallpaperCancelAnimationFrame = window.wallpaperCancelAnimationFrame
       || function(id){ return window.cancelAnimationFrame(id); };
-  window.__anispaperCapture = function(src){
-    try{
-      if(src === 'poll'){
-        try{ window.__anispaperLastPoll = performance.now(); }catch(e){}
-      }
-      if(!window.__anispaperBg){
-        const candidates = [];
-        const bg = document.body ? getComputedStyle(document.body).backgroundImage : '';
-        const m = bg && bg.match(/url\(["']?([^"')]+)["']?\)/);
-        if(m) candidates.push(m[1]);
-        candidates.unshift('image/bg.png');
-        candidates.push('background.png','bg.png');
-        window.__anispaperBg = new Image();
-        window.__anispaperBg.src = candidates[0];
-        window.__anispaperBg.onerror = function(){
-          const next = candidates.find(function(u){ return u !== window.__anispaperBg.src; });
-          if(next){ window.__anispaperBg.onerror=null; window.__anispaperBg.src=next; }
-        };
-      }
-      const canvases = document.querySelectorAll('canvas');
-      let best = null, area = 0;
-      for(let i = 0; i < canvases.length; ++i){
-        const c = canvases[i];
-        const a = (c.width || 0) * (c.height || 0);
-        if(a > area){ area = a; best = c; }
-      }
-      // Spine wallpapers also layer a <video> under/over the WebGL canvas
-      // (e.g. Nikke: <video id="video2"> + #player-container).  Capturing
-      // only the canvas dropped the video layer entirely.
-      let bestVideo = null, videoArea = 0;
-      try{
-        const videos = document.querySelectorAll('video');
-        for(let i = 0; i < videos.length; ++i){
-          const v = videos[i];
-          const vw = v.videoWidth || v.clientWidth || 0;
-          const vh = v.videoHeight || v.clientHeight || 0;
-          const a = vw * vh;
-          if(v.readyState >= 2 && a > videoArea){ videoArea = a; bestVideo = v; }
-        }
-      }catch(e){}
-      // Single canvas layer and no bg image or video (the common Spine
-      // case): read the canvas back directly.  drawImage() of a WebGL
-      // canvas into a 2D scratch loses the frame (drawing-buffer rules),
-      // while the canvas's own toDataURL stays readable — measured
-      // 209 KB detailed vs 6 KB black on the same frame.
-      const bgEl = window.__anispaperBg;
-      const boolHasBg = !!(bgEl && bgEl.complete && bgEl.naturalWidth);
-      if(best && area >= 4 && !boolHasBg && !bestVideo){
-        try{ return best.toDataURL('image/jpeg', 0.88); }catch(e){}
-      }
-      // Multi-layer pages (bg image and/or video under the canvas): composite
-      // everything through the scratch canvas.  Proven for 2D sources.
-      const tw = Math.max(2, window.innerWidth || 1920);
-      const th = Math.max(2, window.innerHeight || 1080);
-      if(!window.__anispaperScratch){
-        window.__anispaperScratch = document.createElement('canvas');
-      }
-      const o = window.__anispaperScratch;
-      if(o.width !== tw) o.width = tw;
-      if(o.height !== th) o.height = th;
-      // willReadFrequently keeps the scratch in CPU RAM for cheap readback
-      // instead of a GPU-backed canvas (a full GPU->CPU stall per capture
-      // under SwiftShader).
-      const ctx = o.getContext('2d', {alpha: false, willReadFrequently: true});
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, tw, th);
-      const bgImg = window.__anispaperBg;
-      if(bgImg && bgImg.complete && bgImg.naturalWidth){
-        const bs = Math.max(tw / bgImg.naturalWidth, th / bgImg.naturalHeight);
-        const bdw = bgImg.naturalWidth * bs, bdh = bgImg.naturalHeight * bs;
-        ctx.drawImage(bgImg, (tw - bdw) / 2, (th - bdh) / 2, bdw, bdh);
-      }
-      if(bestVideo && videoArea >= 4){
-        try{
-          const vs = Math.max(tw / (bestVideo.videoWidth || tw),
-                              th / (bestVideo.videoHeight || th));
-          const vdw = (bestVideo.videoWidth || tw) * vs,
-                vdh = (bestVideo.videoHeight || th) * vs;
-          ctx.drawImage(bestVideo, (tw - vdw) / 2, (th - vdh) / 2, vdw, vdh);
-        }catch(e){}
-      }
-      if(best && area >= 4){
-        const s = Math.max(tw / best.width, th / best.height);
-        const dw = best.width * s, dh = best.height * s;
-        ctx.drawImage(best, (tw - dw) / 2, (th - dh) / 2, dw, dh);
-      }
-      return o.toDataURL('image/jpeg', 0.88);
-    }catch(e){ return ''; }
-  };
 })();
 )JS";
 
-const char kChannelPumpScript[] = R"JS(
-(function(){
-  function pump(){
-    if(window.__anispaperPaused){
-      requestAnimationFrame(pump);
-      return;
+// The view and its sandbox policy.  Built as a string so the permission
+// handler matches the Qt version this child was compiled against.
+QString sceneQml() {
+  QString qml = QStringLiteral(R"QML(
+import QtQuick
+import QtWebEngine
+
+Item {
+  id: root
+  property url pageUrl
+  property var scripts: []
+  property QtObject host
+  property WebEngineProfile profile
+  property bool muted: false
+  signal pageLoaded(bool ok)
+
+  function run(code) { web.runJavaScript(code); }
+
+  // Called once the item is sized and inside the window.  Pages read
+  // innerWidth/innerHeight while parsing (Miku snow sizes its canvas once),
+  // so loading from Component.onCompleted produced a 0x0 viewport.
+  function load() {
+    for (const s of root.scripts) {
+      const script = WebEngine.script();
+      script.name = s.name;
+      script.sourceCode = s.source;
+      script.injectionPoint = WebEngineScript.DocumentCreation;
+      script.worldId = WebEngineScript.MainWorld;
+      script.runsOnSubFrames = false;
+      web.userScripts.insert(script);
     }
-    if(!window.QWebChannel || !window.qt || !qt.webChannelTransport){
-      setTimeout(pump, 50);
-      return;
-    }
-    new QWebChannel(qt.webChannelTransport, function(ch){
-      function loop(t){
-        // rAF tick counter for ANISPAPER_WEB_PROFILE page-rate measurement.
-        window.__anispaperRaf = (window.__anispaperRaf || 0) + 1;
-        if(window.__anispaperPaused){
-          requestAnimationFrame(loop);
-          return;
-        }
-        // NOTE: no capture push here.  C++ grab-first covers every frame;
-        // pushing a full composite+JPEG per rAF burned ~65 ms of renderer
-        // main-thread per tick for payloads C++ discarded, starving the
-        // page itself (measured page rAF collapsed to ~8 Hz).  The QWebChannel
-        // bridge stays registered so ingestCapturedFrame remains available
-        // as a rescue path if explicitly invoked.
-        requestAnimationFrame(loop);
+    // Chromium learns the view size asynchronously.  Park on about:blank
+    // until it reports the real viewport, then load the wallpaper (scripts
+    // were inserted first: DocumentCreation only applies to later loads).
+    web.url = "about:blank";
+  }
+
+  property bool sized: false
+  Timer {
+    id: sizePoll
+    interval: 20
+    repeat: true
+    onTriggered: web.runJavaScript("innerWidth * innerHeight", function(area) {
+      if (root.sized || !(area > 0)) return;
+      root.sized = true;
+      sizePoll.stop();
+      web.url = root.pageUrl;
+    })
+  }
+
+  Connections {
+    target: root.profile
+    function onDownloadRequested(download) { download.cancel(); }
+  }
+
+  WebEngineView {
+    id: web
+    anchors.fill: parent
+    profile: root.profile
+    backgroundColor: "black"
+    audioMuted: root.muted
+    settings.javascriptEnabled: true
+    settings.playbackRequiresUserGesture: false
+    settings.localContentCanAccessRemoteUrls: true
+    settings.localContentCanAccessFileUrls: true
+    settings.allowRunningInsecureContent: false
+    settings.javascriptCanOpenWindows: false
+    settings.pluginsEnabled: false
+    settings.webGLEnabled: true
+    settings.accelerated2dCanvasEnabled: true
+    settings.errorPageEnabled: false
+    settings.autoLoadIconsForPage: false
+    settings.scrollAnimatorEnabled: false
+    settings.showScrollBars: false
+    onLoadingChanged: function(info) {
+      if (!root.sized) {
+        if (info.status === WebEngineView.LoadSucceededStatus) sizePoll.start();
+        return;
       }
-      requestAnimationFrame(loop);
-    });
+      if (info.status === WebEngineView.LoadSucceededStatus) root.pageLoaded(true);
+      else if (info.status === WebEngineView.LoadFailedStatus) root.pageLoaded(false);
+    }
+    onJavaScriptConsoleMessage: function(level, message, line, source) {
+      if (root.host) root.host.logConsole(level, message, line, source);
+    }
+    onNewWindowRequested: function(request) {}
+    %1
   }
-  if(document.readyState === 'loading'){
-    document.addEventListener('DOMContentLoaded', pump);
-  } else {
-    pump();
-  }
-})();
-)JS";
+}
+)QML");
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+  return qml.arg(QStringLiteral(
+      "onPermissionRequested: function(permission) { permission.deny(); }"));
+#else
+  return qml.arg(QStringLiteral(
+      "onFeaturePermissionRequested: function(origin, feature) {"
+      " grantFeaturePermission(origin, feature, false); }"));
+#endif
+}
 
 }  // namespace
 
-// ANISPAPER_WEB_PROFILE=1 logs per-stage capture costs averaged every 60
-// accepted frames (file log: the child swallows stderr).  Stages:
-//   tick  = QTimer inter-arrival (16.7ms ideal @60fps request)
-//   grab  = view_->grab() compositor snapshot
-//   conv  = QPixmap->QImage + RGBA convert (CPU copies)
-//   check = imageHasContent scan
-//   cover = acceptFrame rescale (0 when already native size)
-//   js    = runJavaScript roundtrip (fallback path only)
-//   dec   = dataURL base64+JPEG decode (fallback path only)
-//   emit  = frameReady emit incl. SHM publish memcpy
+// ANISPAPER_WEB_PROFILE=1 logs per-stage costs averaged every 60 published
+// frames (file log: the child swallows stderr).  Stages:
+//   render = polish+sync+render of the offscreen Quick scene
+//   read   = glReadPixels of the composited frame into the publish image
+//   emit   = frameReady emit incl. SHM publish memcpy
+//   skip   = ticks with no new Chromium frame (nothing rendered)
 struct WebProfiler {
   const bool enabled = qEnvironmentVariableIsSet("ANISPAPER_WEB_PROFILE");
-  double tickMs = 0.0;
-  double grabMs = 0.0;
-  double convMs = 0.0;
-  double checkMs = 0.0;
-  double coverMs = 0.0;
-  double jsMs = 0.0;
-  double decMs = 0.0;
+  double renderMs = 0.0;
+  double readMs = 0.0;
   double emitMs = 0.0;
-  qint64 lastTickMs = 0;
-  int tickN = 0;
   int n = 0;
-  int jpgN = 0;
-  int grabN = 0;
+  int skipped = 0;
   void report() {
-    if (!enabled || n < 60) return;
-    // NOTE: qWarning/stderr is swallowed in the QtWebEngine child process
-    // (even Chromium --enable-logging never surfaces), so append to a file.
-    // Per-PID path: daemon web children share the env and would otherwise
-    // interleave lines into one log.
+    if (!enabled || n + skipped < 60) return;
+    const int rendered = qMax(1, n + skipped);
     QFile log(profileLogPath());
     if (log.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
       QTextStream out(&log);
-      out << "[web-profile] tick=" << QString::number(
-                   tickN ? tickMs / tickN : 0, 'f', 1)
-          << " grab=" << QString::number(grabMs / n, 'f', 1)
-          << " conv=" << QString::number(convMs / n, 'f', 1)
-          << " check=" << QString::number(checkMs / n, 'f', 1)
-          << " cover=" << QString::number(coverMs / n, 'f', 1)
-          << " js=" << QString::number(jsMs / n, 'f', 1)
-          << " dec=" << QString::number(decMs / n, 'f', 1)
-          << " emit=" << QString::number(emitMs / n, 'f', 1) << " ms  n="
-          << n << " jpg=" << jpgN << " grabN=" << grabN
-          << "\n";
+      out << "[web-profile] render=" << QString::number(renderMs / rendered, 'f', 2)
+          << " read=" << QString::number(readMs / rendered, 'f', 2)
+          << " emit=" << QString::number(emitMs / qMax(1, n), 'f', 2) << " ms  n=" << n
+          << " skip=" << skipped << "\n";
     }
-    tickMs = grabMs = convMs = checkMs = coverMs = 0.0;
-    jsMs = decMs = emitMs = 0.0;
-    tickN = 0;
-    n = jpgN = grabN = 0;
+    renderMs = readMs = emitMs = 0.0;
+    n = skipped = 0;
   }
 };
 
 WebProfiler g_webProfiler;
 
+void WebRenderer::prepareProcess() {
+  // QtWebEngineQuick shares GL contexts with Qt Quick; both settings must be
+  // in place before the QApplication exists.
+  QtWebEngineQuick::initialize();
+  QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
+}
+
 WebRenderer::WebRenderer(RendererSpec spec, QObject *parent)
     : Renderer(std::move(spec), parent) {
   frameTimer_.setTimerType(Qt::PreciseTimer);
-  connect(&frameTimer_, &QTimer::timeout, this, &WebRenderer::captureFrame);
+  connect(&frameTimer_, &QTimer::timeout, this, &WebRenderer::renderFrame);
 }
 
 WebRenderer::~WebRenderer() { stop(); }
+
+int WebRenderer::frameIntervalMs() const {
+  return qMax(1, 1000 / qBound(1, spec_.fps, 60));
+}
 
 bool WebRenderer::start(QString *error) {
   if (running_) {
@@ -426,147 +319,155 @@ bool WebRenderer::start(QString *error) {
     return false;
   }
 
-  profile_ = std::make_unique<QWebEngineProfile>();
-  profile_->setPersistentCookiesPolicy(QWebEngineProfile::NoPersistentCookies);
-  profile_->setHttpCacheType(QWebEngineProfile::NoCache);
-  profile_->setSpellCheckEnabled(false);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
-  profile_->setPushServiceEnabled(false);
-#endif
-  auto *interceptor =
-      new SandboxInterceptor(canonicalDirPrefix(spec_.file), profile_.get());
-  profile_->setUrlRequestInterceptor(interceptor);
-  QObject::connect(profile_.get(), &QWebEngineProfile::downloadRequested, this,
-                   [](QWebEngineDownloadRequest *download) {
-                     if (download) download->cancel();
-                   });
-
-  view_ = std::make_unique<QWebEngineView>();
-  auto *page = new LoggingPage(profile_.get(), view_.get());
-  view_->setPage(page);
-  auto *channel = new QWebChannel(page);
-  channel->registerObject(QStringLiteral("anispaper"), this);
-  page->setWebChannel(channel);
-  view_->resize(spec_.width, spec_.height);
-  view_->setAttribute(Qt::WA_DontShowOnScreen, true);
-  page->setBackgroundColor(Qt::black);
-#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-  QObject::connect(
-      page, &QWebEnginePage::lifecycleStateChanged, page,
-      [page](QWebEnginePage::LifecycleState) {
-        if (page->lifecycleState() != QWebEnginePage::LifecycleState::Active) {
-          page->setLifecycleState(QWebEnginePage::LifecycleState::Active);
-        }
-      });
-  page->setLifecycleState(QWebEnginePage::LifecycleState::Active);
-#endif
-#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
-  QObject::connect(page, &QWebEnginePage::permissionRequested, this,
-                   [](QWebEnginePermission permission) { permission.deny(); });
-#else
-  QObject::connect(
-      page, &QWebEnginePage::featurePermissionRequested, this,
-      [page](const QUrl &securityOrigin, QWebEnginePage::Feature feature) {
-        page->setFeaturePermission(securityOrigin, feature,
-                                   QWebEnginePage::PermissionDeniedByUser);
-      });
-#endif
-#if QT_VERSION >= QT_VERSION_CHECK(6, 2, 0)
-  QObject::connect(page, &QWebEnginePage::newWindowRequested, this,
-                   [](QWebEngineNewWindowRequest &) {});
-#endif
-
-  auto *settings = view_->settings();
-  settings->setAttribute(QWebEngineSettings::JavascriptEnabled, true);
-  settings->setAttribute(QWebEngineSettings::PlaybackRequiresUserGesture, false);
-  settings->setAttribute(QWebEngineSettings::LocalContentCanAccessRemoteUrls,
-                         true);
-  settings->setAttribute(QWebEngineSettings::LocalContentCanAccessFileUrls,
-                         true);
-  settings->setAttribute(QWebEngineSettings::AllowRunningInsecureContent, false);
-  settings->setAttribute(QWebEngineSettings::JavascriptCanOpenWindows, false);
-  settings->setAttribute(QWebEngineSettings::PluginsEnabled, false);
-  settings->setAttribute(QWebEngineSettings::WebGLEnabled, true);
-  settings->setAttribute(QWebEngineSettings::Accelerated2dCanvasEnabled, true);
-  settings->setAttribute(QWebEngineSettings::ErrorPageEnabled, false);
-  settings->setAttribute(QWebEngineSettings::AutoLoadIconsForPage, false);
-  settings->setAttribute(QWebEngineSettings::ScrollAnimatorEnabled, false);
-
-  injectScripts();
-
-  connect(view_.get(), &QWebEngineView::loadFinished, this, [this](bool ok) {
-    loaded_ = ok;
-    if (g_webProfiler.enabled) {
-      QFile log(profileLogPath());
-      if (log.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
-        QTextStream out(&log);
-        out << "[web-load] finished ok=" << ok << " t="
-            << QDateTime::currentMSecsSinceEpoch() << "\n";
-      }
-    }
-    if (!ok) {
-      activateFallback(QStringLiteral("web load failed"));
-      return;
-    }
-    applyMediaVolume();
-    const QString late =
-        WallpaperProperties::applyUserPropertiesScript(spec_.properties);
-    if (view_ && view_->page() && !late.isEmpty()) {
-      view_->page()->runJavaScript(late);
-    }
-  });
-  view_->load(QUrl::fromLocalFile(QFileInfo(spec_.file).absoluteFilePath()));
-  view_->show();
-  applyMediaVolume();
-
   running_ = true;
   paused_ = false;
   loaded_ = false;
   fallback_ = true;
-  grabWorks_ = false;
-  jsInFlight_ = false;
-  lastPushMs_ = 0;
+  lastHash_ = 0;
   frameCount_ = 0;
   fpsEpochMs_ = QDateTime::currentMSecsSinceEpoch();
   frame_ = placeholderFrame(QStringLiteral("ANISPAPER WEB"));
   QTimer::singleShot(0, this, [this] { emit frameReady(frame_); });
-  frameTimer_.start(qMax(1, 1000 / qBound(1, spec_.fps, 60)));
-  if (g_webProfiler.enabled) {
-    // Page-rate probe: reads the pump loop's rAF tick counter every 5 s.
-    // Tells whether the page itself renders at 60 Hz or is throttled.
-    auto *rafProbe = new QTimer(this);
-    rafProbe->setInterval(5000);
-    auto lastRaf = std::make_shared<qint64>(0);
-    auto lastT = std::make_shared<qint64>(0);
-    connect(rafProbe, &QTimer::timeout, this, [this, lastRaf, lastT] {
-      if (!running_ || !view_ || !view_->page()) return;
-      QPointer<WebRenderer> self(this);
-      view_->page()->runJavaScript(QStringLiteral("window.__anispaperRaf || 0"),
-                                   [self, lastRaf, lastT](const QVariant &r) {
-                                     if (!self) return;
-                                     const qint64 now =
-                                         QDateTime::currentMSecsSinceEpoch();
-                                     const qint64 raf = r.toLongLong();
-                                     QFile log(profileLogPath());
-                                     if (*lastT != 0 &&
-                                         log.open(QIODevice::WriteOnly |
-                                                  QIODevice::Append |
-                                                  QIODevice::Text)) {
-                                       QTextStream out(&log);
-                                       const double dt =
-                                           (now - *lastT) / 1000.0;
-                                       out << "[web-page] rafHz="
-                                           << QString::number(
-                                                  (raf - *lastRaf) / dt, 'f', 1)
-                                           << "\n";
-                                     }
-                                     *lastRaf = raf;
-                                     *lastT = now;
-                                   });
-    });
-    rafProbe->start();
+
+  QString reason;
+  if (!createScene(&reason)) {
+    // No GL in this session: keep publishing the preview instead of dying,
+    // the same contract the old capture path had.
+    destroyScene();
+    activateFallback(reason);
+    return true;
   }
+  frameTimer_.start(frameIntervalMs());
   return true;
+}
+
+bool WebRenderer::createScene(QString *reason) {
+  const QSize size(spec_.width, spec_.height);
+
+  context_ = std::make_unique<QOpenGLContext>();
+  QSurfaceFormat format = QSurfaceFormat::defaultFormat();
+  format.setDepthBufferSize(24);
+  format.setStencilBufferSize(8);
+  context_->setFormat(format);
+  context_->setShareContext(QOpenGLContext::globalShareContext());
+  if (!context_->create()) {
+    *reason = QStringLiteral("web GL context unavailable");
+    return false;
+  }
+  surface_ = std::make_unique<QOffscreenSurface>();
+  surface_->setFormat(context_->format());
+  surface_->create();
+  if (!context_->makeCurrent(surface_.get())) {
+    *reason = QStringLiteral("web GL context cannot be made current");
+    return false;
+  }
+
+  renderControl_ = std::make_unique<QQuickRenderControl>();
+  window_ = std::make_unique<QQuickWindow>(renderControl_.get());
+  window_->setGraphicsDevice(
+      QQuickGraphicsDevice::fromOpenGLContext(context_.get()));
+  window_->resize(size);
+  window_->setColor(Qt::black);
+  if (!renderControl_->initialize()) {
+    *reason = QStringLiteral("web render control unavailable");
+    return false;
+  }
+  fbo_ = std::make_unique<QOpenGLFramebufferObject>(
+      size, QOpenGLFramebufferObject::CombinedDepthStencil);
+  QQuickRenderTarget target =
+      QQuickRenderTarget::fromOpenGLTexture(fbo_->texture(), size);
+  // Render upside down so glReadPixels yields top-down rows with no CPU flip.
+  target.setMirrorVertically(true);
+  window_->setRenderTarget(target);
+  profile_ = std::make_unique<QQuickWebEngineProfile>();
+  profile_->setOffTheRecord(true);
+  profile_->setPersistentCookiesPolicy(QQuickWebEngineProfile::NoPersistentCookies);
+  profile_->setHttpCacheType(QQuickWebEngineProfile::NoCache);
+  profile_->setSpellCheckEnabled(false);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+  profile_->setPushServiceEnabled(false);
+#endif
+  profile_->setUrlRequestInterceptor(
+      new SandboxInterceptor(canonicalDirPrefix(spec_.file), profile_.get()));
+
+  QVariantList scripts;
+  auto addScript = [&scripts](const QString &name, const QString &source) {
+    if (source.isEmpty()) return;
+    scripts.append(QVariantMap{{QStringLiteral("name"), name},
+                               {QStringLiteral("source"), source}});
+  };
+  addScript(QStringLiteral("anispaper-we-bootstrap"),
+            QString::fromUtf8(kBootstrapScript));
+  addScript(QStringLiteral("anispaper-we-properties"),
+            WallpaperProperties::applyUserPropertiesScript(spec_.properties));
+
+  engine_ = std::make_unique<QQmlEngine>();
+  QQmlComponent component(engine_.get());
+  component.setData(sceneQml().toUtf8(), QUrl());
+  root_ = component.createWithInitialProperties(
+      {{QStringLiteral("pageUrl"),
+        QUrl::fromLocalFile(QFileInfo(spec_.file).absoluteFilePath())},
+       {QStringLiteral("scripts"), scripts},
+       {QStringLiteral("host"), QVariant::fromValue<QObject *>(this)},
+       {QStringLiteral("profile"),
+        QVariant::fromValue<QObject *>(profile_.get())},
+       {QStringLiteral("muted"), spec_.volume <= 0.0},
+       {QStringLiteral("width"), size.width()},
+       {QStringLiteral("height"), size.height()}});
+  auto *item = qobject_cast<QQuickItem *>(root_);
+  if (!item) {
+    *reason = QStringLiteral("web scene failed: %1").arg(component.errorString());
+    return false;
+  }
+  item->setParentItem(window_->contentItem());
+  item->setSize(size);
+  connect(root_, SIGNAL(pageLoaded(bool)), this, SLOT(onPageLoaded(bool)));
+  QMetaObject::invokeMethod(root_, "load");
+  return true;
+}
+
+void WebRenderer::destroyScene() {
+  if (context_ && surface_) context_->makeCurrent(surface_.get());
+  delete root_;
+  root_ = nullptr;
+  engine_.reset();
+  window_.reset();
+  renderControl_.reset();
+  fbo_.reset();
+  if (context_) context_->doneCurrent();
+  // The page holds a reference to its profile; drop the profile last.
+  profile_.reset();
+  context_.reset();
+  surface_.reset();
+}
+
+void WebRenderer::onPageLoaded(bool ok) {
+  if (g_webProfiler.enabled) {
+    QFile log(profileLogPath());
+    if (log.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+      QTextStream out(&log);
+      out << "[web-load] finished ok=" << ok << " t="
+          << QDateTime::currentMSecsSinceEpoch() << "\n";
+    }
+  }
+  if (!ok) {
+    loaded_ = false;
+    activateFallback(QStringLiteral("web load failed"));
+    emit frameReady(frame_);
+    return;
+  }
+  loaded_ = true;
+  loadClock_.start();
+  applyMediaVolume();
+  // Late delivery after `load`: pages such as Miku snow build their scene in
+  // <body onload> and throw if applyUserProperties lands before it, so the
+  // DocumentCreation deliveries alone can all miss on a slow start.
+  runJavaScript(WallpaperProperties::applyUserPropertiesScript(spec_.properties));
+  if (paused_) {
+    runJavaScript(QStringLiteral(
+        "window.__anispaperPaused=true;"
+        "document.querySelectorAll('audio,video').forEach(e=>e.pause())"));
+  }
 }
 
 void WebRenderer::stop() {
@@ -574,14 +475,7 @@ void WebRenderer::stop() {
   running_ = false;
   paused_ = false;
   loaded_ = false;
-  grabWorks_ = false;
-  jsInFlight_ = false;
-  lastPushMs_ = 0;
-  if (view_) {
-    view_->close();
-    view_.reset();
-  }
-  profile_.reset();
+  destroyScene();
 }
 
 void WebRenderer::pause() {
@@ -590,11 +484,9 @@ void WebRenderer::pause() {
   }
   paused_ = true;
   frameTimer_.stop();
-  if (view_ && view_->page()) {
-    view_->page()->runJavaScript(
-        QStringLiteral("window.__anispaperPaused=true;"
-                       "document.querySelectorAll('audio,video').forEach(e=>e.pause())"));
-  }
+  runJavaScript(QStringLiteral(
+      "window.__anispaperPaused=true;"
+      "document.querySelectorAll('audio,video').forEach(e=>e.pause())"));
 }
 
 void WebRenderer::resume() {
@@ -602,11 +494,9 @@ void WebRenderer::resume() {
     return;
   }
   paused_ = false;
-  if (view_ && view_->page()) {
-    view_->page()->runJavaScript(QStringLiteral("window.__anispaperPaused=false"));
-  }
+  runJavaScript(QStringLiteral("window.__anispaperPaused=false"));
   applyMediaVolume();
-  frameTimer_.start(qMax(1, 1000 / qBound(1, spec_.fps, 60)));
+  if (window_) frameTimer_.start(frameIntervalMs());
 }
 
 QImage WebRenderer::lastFrame() const { return frame_; }
@@ -622,177 +512,80 @@ double WebRenderer::frameRate() const { return fps_; }
 void WebRenderer::applyPlayback(int fps, double volume) {
   Renderer::applyPlayback(fps, volume);
   applyMediaVolume();
-  if (running_ && !paused_) {
-    frameTimer_.start(qMax(1, 1000 / qBound(1, spec_.fps, 60)));
+  if (running_ && !paused_ && window_) {
+    frameTimer_.start(frameIntervalMs());
   }
 }
 
-void WebRenderer::captureFrame() {
-  if (!running_ || paused_ || !view_ || !view_->page()) {
+void WebRenderer::logConsole(int level, const QString &message, int line,
+                             const QString &source) {
+  // Spine/boot failures otherwise die silently (the child swallows stderr),
+  // leaving only a black page behind.
+  if (!qEnvironmentVariableIsSet("ANISPAPER_WEB_CONSOLE")) return;
+  QFile log(webConsoleLogPath());
+  if (log.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+    QTextStream out(&log);
+    out << "[web-console] level=" << level << " line=" << line
+        << " src=" << source << " msg=" << message.left(512) << "\n";
+  }
+}
+
+void WebRenderer::renderFrame() {
+  if (!running_ || paused_ || !window_) {
     return;
   }
+  if (!context_->makeCurrent(surface_.get())) {
+    return;
+  }
+  // Drive the scene every tick, loaded or not.  Qt WebEngine paces Chromium's
+  // begin-frames and propagates the view size off the Quick frames we render:
+  // without them pages parse with a 0x0 viewport and Spine loaders stall.
+  // It also swaps the page texture without reliably emitting
+  // sceneChanged/renderRequested, so neither signal can gate the work.
+  QElapsedTimer stage;
+  if (g_webProfiler.enabled) stage.start();
+  renderControl_->polishItems();
+  renderControl_->beginFrame();
+  renderControl_->sync();
+  renderControl_->render();
+  renderControl_->endFrame();
   if (g_webProfiler.enabled) {
-    const qint64 t = QDateTime::currentMSecsSinceEpoch();
-    if (g_webProfiler.lastTickMs != 0) {
-      g_webProfiler.tickMs += static_cast<double>(t - g_webProfiler.lastTickMs);
-      ++g_webProfiler.tickN;
-    }
-    g_webProfiler.lastTickMs = t;
+    g_webProfiler.renderMs += stage.nsecsElapsed() / 1e6;
+    stage.restart();
   }
   if (!loaded_) {
     emit frameReady(frame_);
     return;
   }
-  // Hidden QWebEngineView::grab() at 1080p only paints a corner on Wayland.
-  // Compose CSS/bg.png + Spine in-page at native innerWidth/innerHeight so
-  // HDMI matches the preview tab.  The ceiling is the requested fps, not a
-  // hardcoded 32 ms (~31 fps): at fps=60 the slot grid is ~16.6 ms.
-  const qint64 now = QDateTime::currentMSecsSinceEpoch();
-  const int minInterval = qMax(1, 1000 / qBound(1, spec_.fps, 60));
-  // 2 ms early tolerance: QTimer + ms-clock jitter would otherwise lock a
-  // 33 ms grid 0.1 ms early and drop every other tick (see advancePushGrid).
-  if (lastPushMs_ != 0 && now - lastPushMs_ < minInterval - 2) {
-    return;
-  }
-  // QWidget::grab() first: a single synchronous compositor readback with full
-  // page fidelity (DOM + video + every canvas + CSS), lossless into SHM.
-  // The async canvas readback below only fires when the grab paints garbage
-  // (the old Wayland corner-only symptom), so its Chromium-side cost stays
-  // off the hot path.
-  if (tryGrab()) {
-    return;
-  }
-  if (jsInFlight_) {
-    return;
-  }
-  jsInFlight_ = true;
-  jsClock_.restart();
-  QPointer<WebRenderer> self(this);
-  view_->page()->runJavaScript(
-      QStringLiteral("window.__anispaperCapture ? window.__anispaperCapture('poll') : ''"),
-      [self](const QVariant &result) {
-        if (!self) return;
-        self->jsInFlight_ = false;
-        if (g_webProfiler.enabled) g_webProfiler.jsMs += self->jsClock_.elapsed();
-        self->onJsCapture(result);
-      });
-}
 
-// Advances the publication grid after a published frame.  Stays on the grid
-// (no drift) when on time; snaps to now only after a real stall (>2 slots)
-// so missed slots never burst.  Snapping on every publish re-phases the grid
-// by the grab cost each cycle and re-locks the halving (measured 15.2 fps at
-// a 30 fps cap: publish stamped tick+8ms, next 33ms tick landed inside the
-// fresh window, every other tick dropped).
-void WebRenderer::advancePushGrid(qint64 now) {
-  const int minInterval = qMax(1, 1000 / qBound(1, spec_.fps, 60));
-  if (lastPushMs_ == 0 || now - lastPushMs_ > 2 * minInterval) {
-    lastPushMs_ = now;
-  } else {
-    lastPushMs_ += minInterval;
-  }
-}
+  QImage image(spec_.width, spec_.height, QImage::Format_RGBA8888);
+  fbo_->bind();
+  context_->extraFunctions()->glReadPixels(0, 0, spec_.width, spec_.height,
+                                           GL_RGBA, GL_UNSIGNED_BYTE,
+                                           image.bits());
+  fbo_->release();
+  if (g_webProfiler.enabled) g_webProfiler.readMs += stage.nsecsElapsed() / 1e6;
 
-// Synchronous compositor snapshot.  Returns true when a usable frame was
-// published (throttle grid updated too).
-bool WebRenderer::tryGrab() {
-  if (!running_ || paused_ || !view_) {
-    return false;
-  }
-  QElapsedTimer tGrab, tConv, tCheck;
-  if (g_webProfiler.enabled) tGrab.start();
-  const QPixmap pixmap = view_->grab();
-  if (g_webProfiler.enabled) {
-    g_webProfiler.grabMs += tGrab.elapsed();
-    tConv.start();
-  }
-  if (pixmap.isNull()) {
-    return false;
-  }
-  const QImage grabbed =
-      pixmap.toImage().convertToFormat(QImage::Format_RGBA8888);
-  if (g_webProfiler.enabled) {
-    g_webProfiler.convMs += tConv.elapsed();
-    tCheck.start();
-  }
-  const bool ok = imageHasContent(grabbed);
-  if (g_webProfiler.enabled) g_webProfiler.checkMs += tCheck.elapsed();
-  if (!ok) {
-    return false;
-  }
-  grabWorks_ = true;
-  ++g_webProfiler.grabN;
-  advancePushGrid(QDateTime::currentMSecsSinceEpoch());
-  acceptFrame(grabbed);
-  return true;
-}
-
-void WebRenderer::ingestCapturedFrame(const QString &dataUrl) {
-  // The QWebChannel rAF pump and the frameTimer race each other: without the
-  // same throttle the same transport frame was published twice (observed as
-  // back-to-back duplicate seqs at ~7 unique fps).  Share the slot grid.
-  // Grab-first here too: the pushed dataURL is only decoded when the live
-  // compositor snapshot fails.
-  if (!running_ || paused_ || dataUrl.isEmpty()) {
+  // Until the page paints something, keep the preview up: Spine projects can
+  // spend seconds loading 8K atlases on a black page.  Give up waiting after
+  // a while so genuinely dark wallpapers still show.
+  if (fallback_ && !imageHasContent(image) && loadClock_.elapsed() < 15000) {
     return;
   }
-  const qint64 now = QDateTime::currentMSecsSinceEpoch();
-  const int minInterval = qMax(1, 1000 / qBound(1, spec_.fps, 60));
-  if (lastPushMs_ != 0 && now - lastPushMs_ < minInterval - 2) {
+  // Static pages (or a paused canvas) keep producing identical frames;
+  // publishing them again only costs SHM copies and a Plasma texture upload.
+  const quint64 hash = frameHash(image);
+  if (!fallback_ && hash == lastHash_) {
+    ++g_webProfiler.skipped;
+    g_webProfiler.report();
     return;
   }
-  if (tryGrab()) {
-    return;
-  }
-  if (jsInFlight_) {
-    return;
-  }
-  onJsCapture(dataUrl);
-}
-
-void WebRenderer::onJsCapture(const QVariant &result) {
-  if (!running_ || paused_) {
-    return;
-  }
-  // Grab-first: full-page lossless snapshot; canvas readback below is the
-  // fallback for setups where the hidden-view grab paints garbage.
-  if (tryGrab()) {
-    return;
-  }
-  // Canvas readback fallback for setups where the hidden-view grab paints
-  // garbage (the old Wayland corner-only symptom).
-  QElapsedTimer decClock;
-  if (g_webProfiler.enabled) decClock.start();
-  QImage decoded;
-  if (result.typeId() == QMetaType::QString) {
-    decoded = decodeDataUrl(result.toString());
-    if (!decoded.isNull()) ++g_webProfiler.jpgN;
-  }
-  if (g_webProfiler.enabled) g_webProfiler.decMs += decClock.elapsed();
-  if (imageHasContent(decoded)) {
-    advancePushGrid(QDateTime::currentMSecsSinceEpoch());
-    acceptFrame(decoded);
-    return;
-  }
-  if (frame_.isNull()) {
-    activateFallback(QStringLiteral("web frame unavailable"));
-  }
-  emit frameReady(frame_);
+  lastHash_ = hash;
+  acceptFrame(image);
 }
 
 void WebRenderer::acceptFrame(const QImage &image) {
-  QImage frame = image;
-  QElapsedTimer coverClock;
-  if (g_webProfiler.enabled) coverClock.start();
-  if (frame.size() != QSize(spec_.width, spec_.height)) {
-    const QImage covered = coverExact(frame, spec_.width, spec_.height);
-    frame = covered.isNull() ? frame.convertToFormat(QImage::Format_RGBA8888)
-                             : covered;
-  } else if (frame.format() != QImage::Format_RGBA8888) {
-    frame = frame.convertToFormat(QImage::Format_RGBA8888);
-  }
-  if (g_webProfiler.enabled) g_webProfiler.coverMs += coverClock.elapsed();
-  frame_ = frame;
+  frame_ = image;
   fallback_ = false;
   ++frameCount_;
   ++g_webProfiler.n;
@@ -807,7 +600,7 @@ void WebRenderer::acceptFrame(const QImage &image) {
   QElapsedTimer emitClock;
   if (g_webProfiler.enabled) emitClock.start();
   emit frameReady(frame_);
-  if (g_webProfiler.enabled) g_webProfiler.emitMs += emitClock.elapsed();
+  if (g_webProfiler.enabled) g_webProfiler.emitMs += emitClock.nsecsElapsed() / 1e6;
 }
 
 void WebRenderer::activateFallback(const QString &reason) {
@@ -830,36 +623,16 @@ QImage WebRenderer::placeholderFrame(const QString &reason) const {
       spec_.height);
 }
 
-void WebRenderer::injectScripts() {
-  if (!view_ || !view_->page()) return;
-  auto insert = [this](const QString &name, const QString &source) {
-    if (source.isEmpty()) return;
-    QWebEngineScript script;
-    script.setName(name);
-    script.setInjectionPoint(QWebEngineScript::DocumentCreation);
-    script.setWorldId(QWebEngineScript::MainWorld);
-    script.setRunsOnSubFrames(false);
-    script.setSourceCode(source);
-    view_->page()->scripts().insert(script);
-  };
-  insert(QStringLiteral("anispaper-we-bootstrap"),
-         QString::fromUtf8(kBootstrapScript));
-  QFile channelFile(QStringLiteral(":/qtwebchannel/qwebchannel.js"));
-  if (channelFile.open(QIODevice::ReadOnly)) {
-    insert(QStringLiteral("anispaper-qwebchannel"),
-           QString::fromUtf8(channelFile.readAll()));
-  }
-  insert(QStringLiteral("anispaper-we-pump"),
-         QString::fromUtf8(kChannelPumpScript));
-  insert(QStringLiteral("anispaper-we-properties"),
-         WallpaperProperties::applyUserPropertiesScript(spec_.properties));
+void WebRenderer::runJavaScript(const QString &code) {
+  if (!root_ || code.isEmpty()) return;
+  QMetaObject::invokeMethod(root_, "run", Q_ARG(QVariant, code));
 }
 
 void WebRenderer::applyMediaVolume() {
-  if (!view_ || !view_->page()) return;
-  view_->page()->setAudioMuted(spec_.volume <= 0.0);
+  if (!root_) return;
+  root_->setProperty("muted", spec_.volume <= 0.0);
   if (spec_.volume > 0.0) {
-    view_->page()->runJavaScript(
+    runJavaScript(
         QStringLiteral("document.querySelectorAll('audio,video').forEach(e=>{"
                        "e.volume=%1;e.muted=false;e.play().catch(()=>{})})")
             .arg(QString::number(spec_.volume, 'f', 3)));
