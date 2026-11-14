@@ -32,6 +32,9 @@ code):
 - `WallpaperApplication.{h,cpp}`: `getRenderContext()` and
   `setFrameCallback()` — invoked after every dispatched frame, used to read
   the wallpaper FBO and emit protocol frames.
+- `AlbumTexture.cpp`: backported upstream's `GLEW_VERSION_4_5` guard around
+  `glGetnTexImage` (falls back to `glGetTexImage`); the unguarded call was a
+  null-pointer crash when GLEW fails to initialise in the offscreen child.
 
 ## `glfw`
 
